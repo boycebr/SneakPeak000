@@ -10,6 +10,11 @@ import seaborn as sns
 from moviepy.editor import VideoFileClip
 import requests
 import base64
+import uuid
+
+# Supabase configuration
+SUPABASE_URL = "https://tmmheslzkqiveylrnpal.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRtbWhlc2x6a3FpdmV5bHJucGFsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzMzI5MjAsImV4cCI6MjA2OTkwODkyMH0.U-10R707xIs6rH-Vd5lBgh2INylFu6zn_EyoJYx_zpI"
 
 # Page config
 st.set_page_config(
@@ -21,6 +26,92 @@ st.set_page_config(
 # Initialize session state
 if 'processed_videos' not in st.session_state:
     st.session_state.processed_videos = []
+if 'user_session_id' not in st.session_state:
+    st.session_state.user_session_id = str(uuid.uuid4())[:8]
+
+def save_to_supabase(results):
+    """Save analysis results to Supabase database"""
+    try:
+        # Prepare data for database
+        db_data = {
+            "venue_name": results["venue_name"],
+            "venue_type": results["venue_type"],
+            "user_session": st.session_state.user_session_id,
+            "bpm": results["audio_environment"]["bpm"],
+            "volume_level": results["audio_environment"]["volume_level"],
+            "genre": results["audio_environment"]["genre"],
+            "energy_level": results["audio_environment"]["energy_level"],
+            "brightness_level": results["visual_environment"]["brightness_level"],
+            "lighting_type": results["visual_environment"]["lighting_type"],
+            "color_scheme": results["visual_environment"]["color_scheme"],
+            "visual_energy": results["visual_environment"]["visual_energy"],
+            "crowd_density": results["crowd_density"]["crowd_density"],
+            "activity_level": results["crowd_density"]["activity_level"],
+            "density_score": results["crowd_density"]["density_score"],
+            "dominant_mood": results["mood_recognition"]["dominant_mood"],
+            "mood_confidence": results["mood_recognition"]["confidence"],
+            "overall_vibe": results["mood_recognition"]["overall_vibe"],
+            "energy_score": calculate_energy_score(results)
+        }
+        
+        # Send to Supabase
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
+        
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/video_results",
+            headers=headers,
+            json=db_data
+        )
+        
+        if response.status_code == 201:
+            st.success("✅ Results saved to database!")
+            return True
+        else:
+            st.error(f"❌ Database save failed: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        st.error(f"❌ Database error: {str(e)}")
+        return False
+
+def load_all_results():
+    """Load all results from Supabase database"""
+    try:
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+        
+        response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc",
+            headers=headers
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"Failed to load data: {response.status_code}")
+            return []
+            
+    except Exception as e:
+        st.error(f"Database error: {str(e)}")
+        return []
+
+def calculate_energy_score(results):
+    """Calculate energy score for consistency"""
+    energy_score = (
+        (results["audio_environment"]["bpm"] / 160) * 0.3 +
+        (results["audio_environment"]["volume_level"] / 100) * 0.2 +
+        (results["crowd_density"]["density_score"] / 20) * 0.3 +
+        results["mood_recognition"]["confidence"] * 0.2
+    ) * 100
+    
+    return min(100, max(0, energy_score))
 
 def extract_audio_features(video_path):
     """Extract audio features from video"""
@@ -360,6 +451,81 @@ def main():
     
     st.info("🔧 **Demo Mode**: This is a simplified version that works without OpenCV. Results are simulated but follow realistic patterns.")
     
+    # Add admin dashboard option
+    view_mode = st.sidebar.radio("View Mode", ["Upload Videos", "Admin Dashboard"])
+    
+    if view_mode == "Admin Dashboard":
+        st.subheader("📊 Admin Dashboard - All Results")
+        
+        if st.button("🔄 Refresh Data"):
+            st.rerun()
+        
+        all_results = load_all_results()
+        
+        if all_results:
+            st.success(f"Found {len(all_results)} total submissions")
+            
+            # Convert to DataFrame for better display
+            df_data = []
+            for result in all_results:
+                df_data.append({
+                    "Date": result.get("created_at", "")[:10],
+                    "Venue": result.get("venue_name", ""),
+                    "Type": result.get("venue_type", ""),
+                    "User": result.get("user_session", "")[:8],
+                    "BPM": result.get("bpm", 0),
+                    "Volume": result.get("volume_level", 0),
+                    "Crowd": result.get("crowd_density", ""),
+                    "Mood": result.get("dominant_mood", ""),
+                    "Energy Score": round(result.get("energy_score", 0), 1)
+                })
+            
+            df = pd.DataFrame(df_data)
+            st.dataframe(df, use_container_width=True)
+            
+            # Summary stats
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Submissions", len(all_results))
+            with col2:
+                avg_energy = df["Energy Score"].mean() if not df.empty else 0
+                st.metric("Avg Energy Score", f"{avg_energy:.1f}")
+            with col3:
+                unique_venues = df["Venue"].nunique() if not df.empty else 0
+                st.metric("Unique Venues", unique_venues)
+            with col4:
+                unique_users = df["User"].nunique() if not df.empty else 0
+                st.metric("Unique Users", unique_users)
+            
+            # Charts
+            if not df.empty:
+                st.subheader("📈 Analytics")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Venue type distribution
+                    venue_counts = df["Type"].value_counts()
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    ax.pie(venue_counts.values, labels=venue_counts.index, autopct='%1.1f%%')
+                    ax.set_title("Venue Types Tested")
+                    st.pyplot(fig)
+                
+                with col2:
+                    # Energy score distribution
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    ax.hist(df["Energy Score"], bins=10, alpha=0.7, color='skyblue')
+                    ax.set_xlabel("Energy Score")
+                    ax.set_ylabel("Frequency")
+                    ax.set_title("Energy Score Distribution")
+                    st.pyplot(fig)
+        
+        else:
+            st.info("No results found in database yet. Upload some videos first!")
+        
+        return
+    
+    # Regular upload interface
     # Sidebar for previous results
     st.sidebar.title("📊 Previous Results")
     if st.session_state.processed_videos:
@@ -369,6 +535,9 @@ def main():
                 st.write(f"**BPM:** {result['audio_environment']['bpm']}")
                 st.write(f"**Crowd:** {result['crowd_density']['crowd_density']}")
                 st.write(f"**Mood:** {result['mood_recognition']['dominant_mood']}")
+    
+    # Display user session ID
+    st.sidebar.info(f"Your session ID: {st.session_state.user_session_id}")
     
     # Main upload interface
     st.subheader("📤 Upload Video")
@@ -397,6 +566,9 @@ def main():
                 
                 # Save to session state
                 st.session_state.processed_videos.append(results)
+                
+                # Save to Supabase database
+                save_to_supabase(results)
                 
                 # Download results as JSON
                 st.download_button(
