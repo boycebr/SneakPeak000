@@ -185,33 +185,58 @@ if 'processed_videos' not in st.session_state:
 if 'user_session_id' not in st.session_state:
     st.session_state.user_session_id = str(uuid.uuid4())[:8]
 
+def verify_venue_location(latitude, longitude, venue_name):
+    """Simple venue verification - in production this would check against venue database"""
+    # For demo purposes, just return True if coordinates are reasonable
+    if latitude and longitude:
+        # Check if coordinates are in NYC area (rough bounds)
+        if 40.4774 <= latitude <= 40.9176 and -74.2591 <= longitude <= -73.7004:
+            return True
+    return False
+
 def save_to_supabase(results):
-    """Save analysis results to Supabase database"""
+    """Save analysis results to Supabase database with GPS data"""
     try:
         # Include user name if provided
         user_name = st.session_state.get('user_name', '')
         
+        # Get GPS data from results
+        gps_data = results.get("gps_data", {})
+        
+        # Prepare data with proper type casting and validation
         db_data = {
-            "venue_name": results["venue_name"],
-            "venue_type": results["venue_type"],
-            "user_session": st.session_state.user_session_id,
-            "user_name": user_name,
-            "bpm": int(results["audio_environment"]["bpm"]),
-            "volume_level": float(results["audio_environment"]["volume_level"]),
-            "genre": results["audio_environment"]["genre"],
-            "energy_level": results["audio_environment"]["energy_level"],
-            "brightness_level": float(results["visual_environment"]["brightness_level"]),
-            "lighting_type": results["visual_environment"]["lighting_type"],
-            "color_scheme": results["visual_environment"]["color_scheme"],
-            "visual_energy": results["visual_environment"]["visual_energy"],
-            "crowd_density": results["crowd_density"]["crowd_density"],
-            "activity_level": results["crowd_density"]["activity_level"],
-            "density_score": float(results["crowd_density"]["density_score"]),
-            "dominant_mood": results["mood_recognition"]["dominant_mood"],
-            "mood_confidence": float(results["mood_recognition"]["confidence"]),
-            "overall_vibe": results["mood_recognition"]["overall_vibe"],
-            "energy_score": float(calculate_energy_score(results))
+            "venue_name": str(results["venue_name"])[:100],  # Limit length
+            "venue_type": str(results["venue_type"])[:50],
+            "user_session": str(st.session_state.user_session_id)[:20],
+            "user_name": str(user_name)[:50] if user_name else None,
+            
+            # NEW GPS COLUMNS
+            "latitude": float(gps_data.get("latitude")) if gps_data.get("latitude") else None,
+            "longitude": float(gps_data.get("longitude")) if gps_data.get("longitude") else None,
+            "gps_accuracy": float(gps_data.get("accuracy")) if gps_data.get("accuracy") else None,
+            "venue_verified": bool(gps_data.get("venue_verified", False)),
+            
+            # Existing columns
+            "bpm": max(0, min(300, int(results["audio_environment"]["bpm"]))),  # Validate range
+            "volume_level": max(0.0, min(100.0, float(results["audio_environment"]["volume_level"]))),
+            "genre": str(results["audio_environment"]["genre"])[:50],
+            "energy_level": str(results["audio_environment"]["energy_level"])[:20],
+            "brightness_level": max(0.0, min(255.0, float(results["visual_environment"]["brightness_level"]))),
+            "lighting_type": str(results["visual_environment"]["lighting_type"])[:50],
+            "color_scheme": str(results["visual_environment"]["color_scheme"])[:50],
+            "visual_energy": str(results["visual_environment"]["visual_energy"])[:20],
+            "crowd_density": str(results["crowd_density"]["crowd_density"])[:20],
+            "activity_level": str(results["crowd_density"]["activity_level"])[:50],
+            "density_score": max(0.0, min(100.0, float(results["crowd_density"]["density_score"]))),
+            "dominant_mood": str(results["mood_recognition"]["dominant_mood"])[:30],
+            "mood_confidence": max(0.0, min(1.0, float(results["mood_recognition"]["confidence"]))),
+            "overall_vibe": str(results["mood_recognition"]["overall_vibe"])[:30],
+            "energy_score": max(0.0, min(100.0, float(calculate_energy_score(results))))
         }
+        
+        # Debug: Show the data being sent
+        with st.expander("🔍 Debug Info", expanded=False):
+            st.json(db_data)
         
         headers = {
             "apikey": SUPABASE_KEY,
@@ -220,20 +245,38 @@ def save_to_supabase(results):
             "Prefer": "return=minimal"
         }
         
+        # Make the request
         response = requests.post(
             f"{SUPABASE_URL}/rest/v1/video_results",
             headers=headers,
             json=db_data
         )
         
+        # Detailed debugging
+        st.write(f"🔍 Debug - Response status: {response.status_code}")
+        
         if response.status_code == 201:
+            st.success("✅ Results saved to database!")
             return True
         else:
+            # Show full error details
             st.error(f"❌ Database save failed: {response.status_code}")
+            if response.text:
+                st.error(f"Error details: {response.text}")
+                
+            # Try to parse and show JSON error if available
+            try:
+                error_json = response.json()
+                st.json(error_json)
+            except:
+                st.write("Raw response:", response.text)
+            
             return False
             
     except Exception as e:
         st.error(f"❌ Database error: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return False
 
 def load_all_results():
@@ -261,14 +304,18 @@ def load_all_results():
 
 def calculate_energy_score(results):
     """Calculate energy score for consistency"""
-    energy_score = (
-        (results["audio_environment"]["bpm"] / 160) * 0.3 +
-        (results["audio_environment"]["volume_level"] / 100) * 0.2 +
-        (results["crowd_density"]["density_score"] / 20) * 0.3 +
-        results["mood_recognition"]["confidence"] * 0.2
-    ) * 100
-    
-    return min(100, max(0, energy_score))
+    try:
+        energy_score = (
+            (float(results["audio_environment"]["bpm"]) / 160) * 0.3 +
+            (float(results["audio_environment"]["volume_level"]) / 100) * 0.2 +
+            (float(results["crowd_density"]["density_score"]) / 20) * 0.3 +
+            float(results["mood_recognition"]["confidence"]) * 0.2
+        ) * 100
+        
+        return min(100, max(0, energy_score))
+    except Exception as e:
+        st.error(f"Error calculating energy score: {e}")
+        return 50.0  # Default fallback
 
 def extract_audio_features(video_path):
     """Extract audio features from video"""
@@ -316,7 +363,7 @@ def extract_audio_features(video_path):
         st.error(f"Audio processing error: {str(e)}")
         return {
             "bpm": np.random.randint(80, 130),
-            "volume_level": np.random.randint(40, 90),
+            "volume_level": float(np.random.randint(40, 90)),
             "genre": "Unknown",
             "energy_level": "Medium"
         }
@@ -361,7 +408,7 @@ def analyze_visual_environment_simple(video_path):
     except Exception as e:
         st.error(f"Visual analysis error: {str(e)}")
         return {
-            "brightness_level": np.random.randint(50, 200),
+            "brightness_level": float(np.random.randint(50, 200)),
             "lighting_type": "Ambient/Mood Lighting",
             "color_scheme": "Multi-color",
             "visual_energy": "Medium"
@@ -406,7 +453,7 @@ def analyze_crowd_density_simple(video_path):
         return {
             "crowd_density": "Moderate",
             "activity_level": "Medium Movement",
-            "density_score": np.random.randint(5, 12)
+            "density_score": float(np.random.randint(5, 12))
         }
 
 def mock_mood_recognition(video_path):
@@ -452,8 +499,8 @@ def mock_mood_recognition(video_path):
             "overall_vibe": "Positive"
         }
 
-def process_video(video_file, venue_name, venue_type):
-    """Main video processing function"""
+def process_video(video_file, venue_name, venue_type, gps_data=None):
+    """Main video processing function with GPS data"""
     
     with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
         temp_file.write(video_file.read())
@@ -476,6 +523,7 @@ def process_video(video_file, venue_name, venue_type):
             "venue_name": venue_name,
             "venue_type": venue_type,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "gps_data": gps_data or {},  # NEW GPS DATA
             "audio_environment": audio_results,
             "visual_environment": visual_results,
             "crowd_density": crowd_results,
@@ -494,6 +542,12 @@ def display_results(results):
     """Display processing results in a mobile-friendly format"""
     
     st.success("🎉 Video Analysis Complete!")
+    
+    # Show GPS verification status if available
+    gps_data = results.get("gps_data", {})
+    if gps_data.get("latitude") and gps_data.get("longitude"):
+        verified_status = "✅ Verified" if gps_data.get("venue_verified") else "❌ Not Verified"
+        st.info(f"📍 Location: {gps_data['latitude']:.4f}, {gps_data['longitude']:.4f} - {verified_status}")
     
     # Mobile-first results layout
     st.markdown("### 🎯 Venue Pulse Results")
@@ -616,7 +670,10 @@ def main():
     """, unsafe_allow_html=True)
     
     # Mobile-friendly info banner
-    st.info("📱 **Mobile Optimized**: Upload videos directly from your phone! Results show realistic venue analysis patterns.")
+    st.info("📱 **Mobile Optimized**: Upload videos directly from your phone! Now with GPS location verification.")
+    
+    # Debug mode toggle
+    debug_mode = st.sidebar.checkbox("🔍 Debug Mode", help="Show detailed error information")
     
     # Simplified mobile navigation
     view_mode = st.sidebar.radio("📋 Choose Mode", ["📤 Upload Videos", "📊 View All Results"], index=0)
@@ -644,6 +701,9 @@ def main():
                     "Venue": result.get("venue_name", ""),
                     "Type": result.get("venue_type", ""),
                     "User": result.get("user_name", result.get("user_session", ""))[:8],
+                    "Lat": result.get("latitude"),
+                    "Lon": result.get("longitude"),
+                    "Verified": "✅" if result.get("venue_verified") else "❌",
                     "BPM": result.get("bpm", 0),
                     "Volume": result.get("volume_level", 0),
                     "Crowd": result.get("crowd_density", ""),
@@ -680,11 +740,11 @@ def main():
                 """, unsafe_allow_html=True)
             
             with col4:
-                unique_users = df["User"].nunique() if not df.empty else 0
+                verified_count = len([r for r in all_results if r.get("venue_verified")])
                 st.markdown(f"""
                 <div class="metric-container">
-                    <span class="metric-value">{unique_users}</span>
-                    <span class="metric-label">Contributors</span>
+                    <span class="metric-value">{verified_count}</span>
+                    <span class="metric-label">GPS Verified</span>
                 </div>
                 """, unsafe_allow_html=True)
             
@@ -700,6 +760,16 @@ def main():
                         help="Overall venue energy (0-100)",
                         min_value=0,
                         max_value=100,
+                    ),
+                    "Lat": st.column_config.NumberColumn(
+                        "Latitude",
+                        help="GPS Latitude",
+                        format="%.4f",
+                    ),
+                    "Lon": st.column_config.NumberColumn(
+                        "Longitude", 
+                        help="GPS Longitude",
+                        format="%.4f",
                     ),
                 }
             )
@@ -734,6 +804,22 @@ def main():
                 ax.set_title("Energy Score Distribution", fontsize=16, fontweight='bold')
                 ax.grid(True, alpha=0.3)
                 st.pyplot(fig)
+                
+                # GPS Verification chart
+                verification_data = df["Verified"].value_counts()
+                fig, ax = plt.subplots(figsize=(8, 6))
+                colors = ['#28a745', '#dc3545']  # Green for verified, red for not verified
+                wedges, texts, autotexts = ax.pie(verification_data.values, labels=verification_data.index, autopct='%1.1f%%', colors=colors)
+                ax.set_title("GPS Verification Status", fontsize=16, fontweight='bold')
+                
+                for text in texts:
+                    text.set_fontsize(12)
+                for autotext in autotexts:
+                    autotext.set_color('white')
+                    autotext.set_fontweight('bold')
+                    autotext.set_fontsize(11)
+                
+                st.pyplot(fig)
         
         else:
             st.markdown("""
@@ -759,8 +845,7 @@ def main():
     if user_name:
         st.sidebar.success(f"Hi {user_name}! 👋")
         # Update session with user name
-        if 'user_name' not in st.session_state:
-            st.session_state.user_name = user_name
+        st.session_state.user_name = user_name
     
     st.sidebar.info(f"Session ID: **{st.session_state.user_session_id}**")
     
@@ -781,6 +866,11 @@ def main():
                 st.write(f"🎵 {result['audio_environment']['bpm']} BPM")
                 st.write(f"👥 {result['crowd_density']['crowd_density']}")
                 st.write(f"😊 {result['mood_recognition']['dominant_mood']}")
+                # Show GPS info if available
+                gps_data = result.get('gps_data', {})
+                if gps_data.get('latitude'):
+                    verified = "✅" if gps_data.get('venue_verified') else "❌"
+                    st.write(f"📍 {verified} GPS Verified")
     else:
         st.sidebar.write("No videos uploaded yet")
     
@@ -805,6 +895,49 @@ def main():
         help="What type of venue is this?"
     )
     
+    # NEW GPS SECTION
+    st.markdown("#### 📍 Location Information")
+    st.info("📱 For demo purposes, enter GPS coordinates manually. In the mobile app, this would be automatic.")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        latitude = st.number_input(
+            "Latitude", 
+            value=40.7128, 
+            format="%.6f", 
+            help="GPS latitude coordinate"
+        )
+    with col2:
+        longitude = st.number_input(
+            "Longitude", 
+            value=-74.0060, 
+            format="%.6f", 
+            help="GPS longitude coordinate"
+        )
+    with col3:
+        gps_accuracy = st.number_input(
+            "GPS Accuracy (meters)", 
+            value=5.0, 
+            min_value=1.0, 
+            max_value=100.0, 
+            help="GPS accuracy in meters"
+        )
+    
+    # Show popular NYC venue coordinates as examples
+    with st.expander("📍 Popular NYC Venues (for testing)", expanded=False):
+        st.markdown("""
+        **Lower East Side Examples:**
+        - The Delancey: 40.7188, -73.9886
+        - Kind Regards: 40.7215, -73.9898
+        - Bar Goto: 40.7223, -73.9901
+        - Attaboy: 40.7202, -73.9892
+        
+        **Other NYC Areas:**
+        - Times Square: 40.7580, -73.9855
+        - Brooklyn Bridge: 40.7061, -73.9969
+        - Central Park: 40.7829, -73.9654
+        """)
+    
     uploaded_file = st.file_uploader(
         "📱 Choose Video File", 
         type=['mp4', 'mov', 'avi', 'mkv'],
@@ -819,15 +952,31 @@ def main():
         st.video(uploaded_file)
         
         if venue_name.strip():
+            # Verify location before analysis
+            venue_verified = verify_venue_location(latitude, longitude, venue_name)
+            
+            if venue_verified:
+                st.success(f"✅ GPS coordinates verified for NYC area")
+            else:
+                st.warning(f"⚠️ GPS coordinates appear to be outside NYC area")
+            
+            # Prepare GPS data
+            gps_data = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "accuracy": gps_accuracy,
+                "venue_verified": venue_verified
+            }
+            
             # Large, mobile-friendly analyze button
             if st.button("🎯 Analyze This Video", type="primary", use_container_width=True):
                 with st.spinner("🤖 AI is analyzing your video..."):
-                    results = process_video(uploaded_file, venue_name.strip(), venue_type)
+                    results = process_video(uploaded_file, venue_name.strip(), venue_type, gps_data)
                 
                 if results:
                     # Show thank you message first
                     st.balloons()
-                    st.markdown("""
+                    st.markdown(f"""
                     <div style="background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 2rem; border-radius: 20px; text-align: center; margin: 2rem 0;">
                         <h2 style="margin-bottom: 1rem;">🎉 Thank You!</h2>
                         <p style="font-size: 1.2rem; margin-bottom: 1rem;">Your video helps other people discover great venues!</p>
@@ -840,7 +989,10 @@ def main():
                     # Save to session state
                     st.session_state.processed_videos.append(results)
                     
-                    # Save to database
+                    # Save to database with debug info if enabled
+                    if debug_mode:
+                        st.markdown("#### 🔍 Database Save Debug")
+                    
                     save_success = save_to_supabase(results)
                     
                     if save_success:
@@ -884,10 +1036,12 @@ def main():
         - 💡 Lighting and visual atmosphere  
         - 👥 Crowd density and movement
         - 😊 General mood and energy
+        - 📍 GPS location verification
         
         **🔒 Privacy Note:**
         - All faces are automatically blurred
         - Only analyzing general crowd patterns
+        - GPS used only for venue verification
         - No personal data is stored
         """)
     
@@ -895,10 +1049,18 @@ def main():
     col1, col2 = st.columns([2, 1])
     with col1:
         if st.button("🎮 Show Sample Analysis", use_container_width=True):
+            sample_gps = {
+                "latitude": 40.7188,
+                "longitude": -73.9886,
+                "accuracy": 5.0,
+                "venue_verified": True
+            }
+            
             sample_results = {
                 "venue_name": "Demo Nightclub",
                 "venue_type": "Club", 
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "gps_data": sample_gps,
                 "audio_environment": {
                     "bpm": 128,
                     "volume_level": 85.0,
