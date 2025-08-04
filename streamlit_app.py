@@ -54,6 +54,9 @@ def save_to_supabase(results):
             "energy_score": calculate_energy_score(results)
         }
         
+        # Debug: Print the data being sent
+        st.write("Debug - Data being sent to database:", db_data)
+        
         # Send to Supabase
         headers = {
             "apikey": SUPABASE_KEY,
@@ -67,6 +70,11 @@ def save_to_supabase(results):
             headers=headers,
             json=db_data
         )
+        
+        # Debug: Print response details
+        st.write(f"Debug - Response status: {response.status_code}")
+        if response.status_code != 201:
+            st.write(f"Debug - Response text: {response.text}")
         
         if response.status_code == 201:
             st.success("✅ Results saved to database!")
