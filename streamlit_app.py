@@ -1,12 +1,10 @@
 import streamlit as st
-import cv2
 import numpy as np
 import tempfile
 import os
 from datetime import datetime
 import pandas as pd
 import json
-import librosa
 import matplotlib.pyplot as plt
 import seaborn as sns
 from moviepy.editor import VideoFileClip
@@ -35,27 +33,34 @@ def extract_audio_features(video_path):
         temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
         audio.write_audiofile(temp_audio.name, verbose=False, logger=None)
         
-        # Load audio with librosa
-        y, sr = librosa.load(temp_audio.name)
+        # For demo purposes - simulate audio analysis
+        # In production, you'd use librosa or similar
+        video_duration = video.duration
         
-        # Calculate features
-        tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
-        rms = librosa.feature.rms(y=y)[0]
-        avg_volume = np.mean(rms)
+        # Mock BPM based on video length and random factors
+        base_bpm = np.random.randint(80, 140)
+        tempo_variance = np.random.normal(0, 10)
+        bpm = max(60, min(180, base_bpm + tempo_variance))
         
-        # Spectral features for genre detection
-        spectral_centroid = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        # Mock volume based on file size (rough proxy)
+        try:
+            file_size = os.path.getsize(video_path)
+            volume_level = min(100, (file_size / 1000000) * 20 + np.random.randint(20, 60))
+        except:
+            volume_level = np.random.randint(30, 80)
         
-        # Simple genre classification based on features
-        if tempo > 120 and spectral_centroid > 2000:
+        # Simple genre classification based on BPM
+        if bpm > 120:
             genre = "Electronic/Dance"
-        elif tempo > 100 and spectral_centroid > 1500:
+        elif bpm > 100:
             genre = "Pop/Hip-Hop"
-        elif tempo < 80:
+        elif bpm < 80:
             genre = "Ambient/Chill"
         else:
             genre = "General"
+        
+        # Energy level
+        energy_level = "High" if bpm > 110 and volume_level > 50 else "Medium" if bpm > 80 else "Low"
         
         # Cleanup
         os.unlink(temp_audio.name)
@@ -63,214 +68,168 @@ def extract_audio_features(video_path):
         audio.close()
         
         return {
-            "bpm": int(tempo),
-            "volume_level": float(avg_volume * 100),  # Scale to 0-100
+            "bpm": int(bpm),
+            "volume_level": float(volume_level),
             "genre": genre,
-            "energy_level": "High" if tempo > 110 and avg_volume > 0.1 else "Medium" if tempo > 80 else "Low"
+            "energy_level": energy_level
         }
     except Exception as e:
         st.error(f"Audio processing error: {str(e)}")
         return {
-            "bpm": 0,
-            "volume_level": 0,
+            "bpm": np.random.randint(80, 130),
+            "volume_level": np.random.randint(40, 90),
             "genre": "Unknown",
-            "energy_level": "Unknown"
+            "energy_level": "Medium"
         }
 
-def analyze_visual_environment(video_path):
-    """Analyze visual aspects of the video"""
+def analyze_visual_environment_simple(video_path):
+    """Simplified visual analysis without OpenCV"""
     try:
-        cap = cv2.VideoCapture(video_path)
-        frames = []
-        brightness_values = []
-        color_analysis = []
+        # Get basic video info
+        video = VideoFileClip(video_path)
+        duration = video.duration
+        fps = video.fps if video.fps else 30
         
-        frame_count = 0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        sample_rate = max(1, total_frames // 30)  # Sample every nth frame
+        # Mock analysis based on video properties
+        # In production, you'd analyze actual frames
         
-        while cap.isOpened() and frame_count < total_frames:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            if frame_count % sample_rate == 0:
-                # Convert to RGB
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(frame_rgb)
-                
-                # Calculate brightness
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                brightness = np.mean(gray)
-                brightness_values.append(brightness)
-                
-                # Color analysis
-                mean_colors = np.mean(frame_rgb.reshape(-1, 3), axis=0)
-                color_analysis.append(mean_colors)
-            
-            frame_count += 1
+        # Simulate brightness based on file size and duration
+        file_size = os.path.getsize(video_path)
+        brightness_factor = (file_size / duration) / 100000
+        brightness = max(20, min(255, brightness_factor + np.random.randint(50, 150)))
         
-        cap.release()
-        
-        if not brightness_values:
-            return {
-                "brightness_level": 0,
-                "lighting_type": "Unknown",
-                "color_scheme": "Unknown",
-                "visual_energy": "Unknown"
-            }
-        
-        avg_brightness = np.mean(brightness_values)
-        brightness_variance = np.var(brightness_values)
-        
-        # Determine lighting type
-        if avg_brightness < 50:
+        # Lighting type based on brightness
+        if brightness < 80:
             lighting_type = "Dark/Club Lighting"
-        elif avg_brightness < 120:
+        elif brightness < 150:
             lighting_type = "Ambient/Mood Lighting"
         else:
             lighting_type = "Bright/Well-lit"
         
-        # Color scheme analysis
-        avg_colors = np.mean(color_analysis, axis=0)
-        dominant_color = ["Red", "Green", "Blue"][np.argmax(avg_colors)]
+        # Random color scheme for demo
+        colors = ["Red-dominant", "Blue-dominant", "Green-dominant", "Purple-dominant", "Multi-color"]
+        color_scheme = np.random.choice(colors)
         
-        # Visual energy based on brightness variance
-        visual_energy = "High" if brightness_variance > 500 else "Medium" if brightness_variance > 200 else "Low"
+        # Visual energy based on fps and duration
+        if fps > 25 and duration > 30:
+            visual_energy = "High"
+        elif fps > 20:
+            visual_energy = "Medium"
+        else:
+            visual_energy = "Low"
+        
+        video.close()
         
         return {
-            "brightness_level": float(avg_brightness),
+            "brightness_level": float(brightness),
             "lighting_type": lighting_type,
-            "color_scheme": f"{dominant_color}-dominant",
+            "color_scheme": color_scheme,
             "visual_energy": visual_energy
         }
     
     except Exception as e:
         st.error(f"Visual analysis error: {str(e)}")
         return {
-            "brightness_level": 0,
-            "lighting_type": "Unknown",
-            "color_scheme": "Unknown",
-            "visual_energy": "Unknown"
+            "brightness_level": np.random.randint(50, 200),
+            "lighting_type": "Ambient/Mood Lighting",
+            "color_scheme": "Multi-color",
+            "visual_energy": "Medium"
         }
 
-def analyze_crowd_density(video_path):
-    """Analyze crowd density and movement"""
+def analyze_crowd_density_simple(video_path):
+    """Simplified crowd analysis without OpenCV"""
     try:
-        cap = cv2.VideoCapture(video_path)
+        # Get video properties
+        video = VideoFileClip(video_path)
+        duration = video.duration
+        file_size = os.path.getsize(video_path)
         
-        # Load pre-trained person detection model
-        # Using Haar cascades as a simple alternative to YOLO for demo
-        person_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fullbody.xml')
+        # Mock crowd density based on file size and duration
+        # Larger files often indicate more movement/activity
+        density_factor = file_size / (duration * 1000000)  # MB per second
         
-        person_counts = []
-        movement_values = []
-        prev_gray = None
-        
-        frame_count = 0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        sample_rate = max(1, total_frames // 20)
-        
-        while cap.isOpened() and frame_count < total_frames:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            if frame_count % sample_rate == 0:
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                
-                # Person detection (simplified)
-                persons = person_cascade.detectMultiScale(gray, 1.1, 3)
-                person_counts.append(len(persons))
-                
-                # Movement detection
-                if prev_gray is not None:
-                    flow = cv2.calcOpticalFlowPyrLK(prev_gray, gray, None, None)[0]
-                    if flow is not None:
-                        movement = np.mean(np.linalg.norm(flow, axis=1)) if len(flow) > 0 else 0
-                        movement_values.append(movement)
-                
-                prev_gray = gray.copy()
-            
-            frame_count += 1
-        
-        cap.release()
-        
-        if not person_counts:
-            return {
-                "crowd_density": "Unknown",
-                "activity_level": "Unknown",
-                "density_score": 0
-            }
-        
-        avg_people = np.mean(person_counts) if person_counts else 0
-        avg_movement = np.mean(movement_values) if movement_values else 0
+        # Simulate person count
+        base_people = max(0, int(density_factor * 10 + np.random.randint(2, 15)))
         
         # Crowd density classification
-        if avg_people > 15:
+        if base_people > 15:
             density = "Packed"
-        elif avg_people > 8:
+        elif base_people > 8:
             density = "Busy"
-        elif avg_people > 3:
+        elif base_people > 3:
             density = "Moderate"
         else:
             density = "Light"
         
-        # Activity level
-        if avg_movement > 5:
+        # Activity level based on file complexity
+        if density_factor > 2:
             activity = "High Movement/Dancing"
-        elif avg_movement > 2:
+        elif density_factor > 1:
             activity = "Moderate Movement"
         else:
             activity = "Low Movement/Standing"
         
+        video.close()
+        
         return {
             "crowd_density": density,
             "activity_level": activity,
-            "density_score": float(avg_people)
+            "density_score": float(base_people)
         }
     
     except Exception as e:
         st.error(f"Crowd analysis error: {str(e)}")
         return {
-            "crowd_density": "Unknown",
-            "activity_level": "Unknown",
-            "density_score": 0
+            "crowd_density": "Moderate",
+            "activity_level": "Medium Movement",
+            "density_score": np.random.randint(5, 12)
         }
 
 def mock_mood_recognition(video_path):
-    """Mock mood recognition - replace with actual API call"""
-    # This is a placeholder for actual mood recognition API
-    # In production, you'd use Azure Emotion API or similar
-    
+    """Mock mood recognition for demo"""
     try:
-        # For demo purposes, generate realistic mock data
-        moods = ["Happy", "Excited", "Relaxed", "Energetic", "Social"]
-        weights = [0.3, 0.25, 0.2, 0.15, 0.1]
+        # Simulate mood analysis based on other factors
+        moods = ["Happy", "Excited", "Relaxed", "Energetic", "Social", "Festive"]
         
-        mood_scores = {}
-        for mood, weight in zip(moods, weights):
-            # Add some randomness but keep it realistic
-            score = weight + np.random.normal(0, 0.1)
-            mood_scores[mood] = max(0, min(1, score))
+        # Weight moods based on simulated crowd and energy
+        mood_weights = {
+            "Happy": 0.25,
+            "Excited": 0.20,
+            "Relaxed": 0.15,
+            "Energetic": 0.20,
+            "Social": 0.15,
+            "Festive": 0.05
+        }
         
-        dominant_mood = max(mood_scores, key=mood_scores.get)
-        confidence = mood_scores[dominant_mood]
+        # Add some randomness
+        for mood in mood_weights:
+            mood_weights[mood] += np.random.normal(0, 0.1)
+            mood_weights[mood] = max(0, min(1, mood_weights[mood]))
+        
+        # Normalize
+        total = sum(mood_weights.values())
+        for mood in mood_weights:
+            mood_weights[mood] = mood_weights[mood] / total
+        
+        dominant_mood = max(mood_weights, key=mood_weights.get)
+        confidence = mood_weights[dominant_mood]
+        
+        overall_vibe = "Positive" if confidence > 0.3 else "Neutral"
         
         return {
             "dominant_mood": dominant_mood,
             "confidence": float(confidence),
-            "mood_breakdown": mood_scores,
-            "overall_vibe": "Positive" if confidence > 0.6 else "Neutral"
+            "mood_breakdown": mood_weights,
+            "overall_vibe": overall_vibe
         }
     
     except Exception as e:
         st.error(f"Mood analysis error: {str(e)}")
         return {
-            "dominant_mood": "Unknown",
-            "confidence": 0,
-            "mood_breakdown": {},
-            "overall_vibe": "Unknown"
+            "dominant_mood": "Happy",
+            "confidence": 0.6,
+            "mood_breakdown": {"Happy": 0.6, "Social": 0.4},
+            "overall_vibe": "Positive"
         }
 
 def process_video(video_file, venue_name, venue_type):
@@ -286,10 +245,10 @@ def process_video(video_file, venue_name, venue_type):
             audio_results = extract_audio_features(temp_video_path)
         
         with st.spinner("🎨 Analyzing visuals..."):
-            visual_results = analyze_visual_environment(temp_video_path)
+            visual_results = analyze_visual_environment_simple(temp_video_path)
         
         with st.spinner("👥 Analyzing crowd..."):
-            crowd_results = analyze_crowd_density(temp_video_path)
+            crowd_results = analyze_crowd_density_simple(temp_video_path)
         
         with st.spinner("😊 Analyzing mood..."):
             mood_results = mock_mood_recognition(temp_video_path)
@@ -309,7 +268,10 @@ def process_video(video_file, venue_name, venue_type):
     
     finally:
         # Cleanup temp file
-        os.unlink(temp_video_path)
+        try:
+            os.unlink(temp_video_path)
+        except:
+            pass
 
 def display_results(results):
     """Display processing results in a nice format"""
@@ -367,10 +329,36 @@ def display_results(results):
     with col3:
         recommendation = "Perfect for dancing!" if energy_score > 75 else "Good for socializing" if energy_score > 50 else "Relaxed atmosphere"
         st.write(f"**Recommendation:** {recommendation}")
+    
+    # Mood breakdown chart
+    if results["mood_recognition"]["mood_breakdown"]:
+        st.subheader("📊 Mood Breakdown")
+        mood_data = results["mood_recognition"]["mood_breakdown"]
+        
+        fig, ax = plt.subplots(figsize=(10, 4))
+        moods = list(mood_data.keys())
+        scores = list(mood_data.values())
+        
+        bars = ax.bar(moods, scores, color=['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57', '#FF9FF3'])
+        ax.set_ylabel('Confidence Score')
+        ax.set_title('Detected Moods in Venue')
+        ax.set_ylim(0, max(scores) * 1.2)
+        
+        # Add value labels on bars
+        for bar, score in zip(bars, scores):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                   f'{score:.2f}', ha='center', va='bottom')
+        
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        st.pyplot(fig)
 
 def main():
     st.title("🎯 SneakPeak Video Scorer")
     st.markdown("Upload venue videos to analyze the vibe and get real-time pulse metrics!")
+    
+    st.info("🔧 **Demo Mode**: This is a simplified version that works without OpenCV. Results are simulated but follow realistic patterns.")
     
     # Sidebar for previous results
     st.sidebar.title("📊 Previous Results")
@@ -435,7 +423,47 @@ def main():
     - Visual environment (lighting, colors, brightness)
     - Crowd density and movement patterns
     - Mood recognition from facial expressions
+    
+    **Note:** This demo version simulates the analysis algorithms. The production version will use actual computer vision and audio processing.
     """)
+    
+    # Sample results for demo
+    if st.button("🎮 Show Sample Results"):
+        sample_results = {
+            "venue_name": "Demo Nightclub",
+            "venue_type": "Club",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "audio_environment": {
+                "bpm": 128,
+                "volume_level": 85.0,
+                "genre": "Electronic/Dance",
+                "energy_level": "High"
+            },
+            "visual_environment": {
+                "brightness_level": 65.0,
+                "lighting_type": "Dark/Club Lighting",
+                "color_scheme": "Purple-dominant",
+                "visual_energy": "High"
+            },
+            "crowd_density": {
+                "crowd_density": "Busy",
+                "activity_level": "High Movement/Dancing",
+                "density_score": 12.0
+            },
+            "mood_recognition": {
+                "dominant_mood": "Excited",
+                "confidence": 0.78,
+                "mood_breakdown": {
+                    "Excited": 0.35,
+                    "Happy": 0.25,
+                    "Energetic": 0.20,
+                    "Social": 0.15,
+                    "Festive": 0.05
+                },
+                "overall_vibe": "Positive"
+            }
+        }
+        display_results(sample_results)
 
 if __name__ == "__main__":
     main()
