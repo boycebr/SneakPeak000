@@ -195,7 +195,7 @@ def verify_venue_location(latitude, longitude, venue_name):
     return False
 
 def save_to_supabase(results):
-    """Save analysis results to Supabase database with GPS data"""
+    """Save analysis results to Supabase database with GPS data and detailed debugging"""
     try:
         # Include user name if provided
         user_name = st.session_state.get('user_name', '')
@@ -210,13 +210,13 @@ def save_to_supabase(results):
             "user_session": str(st.session_state.user_session_id)[:20],
             "user_name": str(user_name)[:50] if user_name else None,
             
-            # NEW GPS COLUMNS
+            # GPS COLUMNS (NEW)
             "latitude": float(gps_data.get("latitude")) if gps_data.get("latitude") else None,
             "longitude": float(gps_data.get("longitude")) if gps_data.get("longitude") else None,
             "gps_accuracy": float(gps_data.get("accuracy")) if gps_data.get("accuracy") else None,
             "venue_verified": bool(gps_data.get("venue_verified", False)),
             
-            # Existing columns
+            # Existing columns with validation
             "bpm": max(0, min(300, int(results["audio_environment"]["bpm"]))),  # Validate range
             "volume_level": max(0.0, min(100.0, float(results["audio_environment"]["volume_level"]))),
             "genre": str(results["audio_environment"]["genre"])[:50],
@@ -523,7 +523,7 @@ def process_video(video_file, venue_name, venue_type, gps_data=None):
             "venue_name": venue_name,
             "venue_type": venue_type,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "gps_data": gps_data or {},  # NEW GPS DATA
+            "gps_data": gps_data or {},  # GPS DATA
             "audio_environment": audio_results,
             "visual_environment": visual_results,
             "crowd_density": crowd_results,
@@ -670,7 +670,7 @@ def main():
     """, unsafe_allow_html=True)
     
     # Mobile-friendly info banner
-    st.info("📱 **Mobile Optimized**: Upload videos directly from your phone! Now with GPS location verification.")
+    st.info("📱 **Mobile Optimized**: Upload videos directly from your phone! Now with GPS location verification and debug fixes.")
     
     # Debug mode toggle
     debug_mode = st.sidebar.checkbox("🔍 Debug Mode", help="Show detailed error information")
@@ -807,19 +807,20 @@ def main():
                 
                 # GPS Verification chart
                 verification_data = df["Verified"].value_counts()
-                fig, ax = plt.subplots(figsize=(8, 6))
-                colors = ['#28a745', '#dc3545']  # Green for verified, red for not verified
-                wedges, texts, autotexts = ax.pie(verification_data.values, labels=verification_data.index, autopct='%1.1f%%', colors=colors)
-                ax.set_title("GPS Verification Status", fontsize=16, fontweight='bold')
-                
-                for text in texts:
-                    text.set_fontsize(12)
-                for autotext in autotexts:
-                    autotext.set_color('white')
-                    autotext.set_fontweight('bold')
-                    autotext.set_fontsize(11)
-                
-                st.pyplot(fig)
+                if len(verification_data) > 0:
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    colors = ['#28a745', '#dc3545']  # Green for verified, red for not verified
+                    wedges, texts, autotexts = ax.pie(verification_data.values, labels=verification_data.index, autopct='%1.1f%%', colors=colors)
+                    ax.set_title("GPS Verification Status", fontsize=16, fontweight='bold')
+                    
+                    for text in texts:
+                        text.set_fontsize(12)
+                    for autotext in autotexts:
+                        autotext.set_color('white')
+                        autotext.set_fontweight('bold')
+                        autotext.set_fontsize(11)
+                    
+                    st.pyplot(fig)
         
         else:
             st.markdown("""
@@ -895,7 +896,7 @@ def main():
         help="What type of venue is this?"
     )
     
-    # NEW GPS SECTION
+    # GPS SECTION
     st.markdown("#### 📍 Location Information")
     st.info("📱 For demo purposes, enter GPS coordinates manually. In the mobile app, this would be automatic.")
     
