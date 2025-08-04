@@ -32,30 +32,30 @@ if 'user_session_id' not in st.session_state:
 def save_to_supabase(results):
     """Save analysis results to Supabase database"""
     try:
-        # Prepare data for database
+        # Prepare data for database - using exact column names from table
         db_data = {
             "venue_name": results["venue_name"],
             "venue_type": results["venue_type"],
             "user_session": st.session_state.user_session_id,
-            "bpm": results["audio_environment"]["bpm"],
-            "volume_level": results["audio_environment"]["volume_level"],
+            "bpm": int(results["audio_environment"]["bpm"]),
+            "volume_level": float(results["audio_environment"]["volume_level"]),
             "genre": results["audio_environment"]["genre"],
             "energy_level": results["audio_environment"]["energy_level"],
-            "brightness_level": results["visual_environment"]["brightness_level"],
+            "brightness_level": float(results["visual_environment"]["brightness_level"]),
             "lighting_type": results["visual_environment"]["lighting_type"],
             "color_scheme": results["visual_environment"]["color_scheme"],
             "visual_energy": results["visual_environment"]["visual_energy"],
             "crowd_density": results["crowd_density"]["crowd_density"],
             "activity_level": results["crowd_density"]["activity_level"],
-            "density_score": results["crowd_density"]["density_score"],
+            "density_score": float(results["crowd_density"]["density_score"]),
             "dominant_mood": results["mood_recognition"]["dominant_mood"],
-            "mood_confidence": results["mood_recognition"]["confidence"],
+            "mood_confidence": float(results["mood_recognition"]["confidence"]),
             "overall_vibe": results["mood_recognition"]["overall_vibe"],
-            "energy_score": calculate_energy_score(results)
+            "energy_score": float(calculate_energy_score(results))
         }
         
         # Debug: Print the data being sent
-        st.write("Debug - Data being sent to database:", db_data)
+        st.write("Debug - Sending to database...")
         
         # Send to Supabase
         headers = {
