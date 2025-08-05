@@ -292,14 +292,23 @@ def load_all_results():
             headers=headers
         )
         
+        # Debug: Show response details
+        st.write(f"🔍 Load Debug - Response status: {response.status_code}")
+        
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            st.write(f"🔍 Found {len(data)} records in database")
+            return data
         else:
             st.error(f"Failed to load data: {response.status_code}")
+            if response.text:
+                st.error(f"Error details: {response.text}")
             return []
             
     except Exception as e:
         st.error(f"Database error: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return []
 
 def calculate_energy_score(results):
@@ -778,8 +787,75 @@ def main():
             if not df.empty:
                 st.markdown("#### 📊 Analytics")
                 
-                # Single column layout for mobile
-                # Venue type distribution
+                # Polar chart for venue characteristics
+                st.markdown("##### 🎯 Venue Characteristics (Polar)")
+                
+                # Create polar chart data
+                avg_metrics = {
+                    'Energy Score': df["Energy Score"].mean(),
+                    'BPM (scaled)': df["BPM"].mean() / 160 * 100,  # Scale to 0-100
+                    'Volume': df["Volume"].mean(),
+                    'Crowd Density': df["Crowd"].apply(lambda x: {"Light": 25, "Moderate": 50, "Busy": 75, "Packed": 100}.get(x, 50)).mean()
+                }
+                
+                # Polar chart
+                fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(projection='polar'))
+                
+                angles = np.linspace(0, 2 * np.pi, len(avg_metrics), endpoint=False)
+                values = list(avg_metrics.values())
+                angles = np.concatenate((angles, [angles[0]]))  # Complete the circle
+                values = np.concatenate((values, [values[0]]))
+                
+                ax.plot(angles, values, 'o-', linewidth=2, color='#667eea')
+                ax.fill(angles, values, alpha=0.25, color='#667eea')
+                ax.set_xticks(angles[:-1])
+                ax.set_xticklabels(avg_metrics.keys())
+                ax.set_ylim(0, 100)
+                ax.set_title('Average Venue Characteristics', size=16, fontweight='bold', pad=20)
+                ax.grid(True)
+                
+                st.pyplot(fig)
+                
+                # Multi-level donut chart for venue breakdown
+                st.markdown("##### 🍩 Multi-Level Venue Analysis")
+                
+                fig, ax = plt.subplots(figsize=(10, 8))
+                
+                # Outer ring: Venue types
+                venue_counts = df["Type"].value_counts()
+                colors_outer = plt.cm.Set3(np.linspace(0, 1, len(venue_counts)))
+                
+                # Inner ring: Energy levels
+                energy_bins = pd.cut(df["Energy Score"], bins=[0, 33, 66, 100], labels=['Low', 'Medium', 'High'])
+                energy_counts = energy_bins.value_counts()
+                colors_inner = ['#ffcccb', '#ffd700', '#90ee90']  # Light red, gold, light green
+                
+                # Create donut chart
+                wedges1, texts1, autotexts1 = ax.pie(venue_counts.values, labels=venue_counts.index, 
+                                                     autopct='%1.1f%%', colors=colors_outer, radius=1.0,
+                                                     wedgeprops=dict(width=0.3, edgecolor='white'))
+                
+                wedges2, texts2, autotexts2 = ax.pie(energy_counts.values, labels=energy_counts.index,
+                                                     autopct='%1.1f%%', colors=colors_inner, radius=0.7,
+                                                     wedgeprops=dict(width=0.3, edgecolor='white'))
+                
+                # Style the text
+                for text in texts1 + texts2:
+                    text.set_fontsize(10)
+                for autotext in autotexts1 + autotexts2:
+                    autotext.set_color('white')
+                    autotext.set_fontweight('bold')
+                    autotext.set_fontsize(9)
+                
+                ax.set_title('Venue Types (Outer) vs Energy Levels (Inner)', fontsize=14, fontweight='bold', pad=20)
+                
+                # Add legend
+                ax.legend(wedges1, venue_counts.index, title="Venue Types", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
+                
+                st.pyplot(fig)
+                
+                # Single column layout for mobile - remaining charts
+                # Venue type distribution (keep original)
                 venue_counts = df["Type"].value_counts()
                 fig, ax = plt.subplots(figsize=(10, 6))
                 colors = plt.cm.Set3(np.linspace(0, 1, len(venue_counts)))
