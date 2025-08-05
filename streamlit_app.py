@@ -287,17 +287,33 @@ def load_all_results():
             "Authorization": f"Bearer {SUPABASE_KEY}",
         }
         
+        # First, try to get just basic info
         response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc",
+            f"{SUPABASE_URL}/rest/v1/video_results?select=id,venue_name,created_at&order=created_at.desc",
             headers=headers
         )
         
         # Debug: Show response details
         st.write(f"🔍 Load Debug - Response status: {response.status_code}")
+        st.write(f"🔍 Request URL: {SUPABASE_URL}/rest/v1/video_results")
         
         if response.status_code == 200:
             data = response.json()
             st.write(f"🔍 Found {len(data)} records in database")
+            if len(data) > 0:
+                st.write("🔍 Sample record:", data[0])
+                
+            # If basic query works, try full query
+            if len(data) > 0:
+                full_response = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc",
+                    headers=headers
+                )
+                if full_response.status_code == 200:
+                    return full_response.json()
+                else:
+                    st.error(f"Full query failed: {full_response.status_code} - {full_response.text}")
+                    return data  # Return basic data at least
             return data
         else:
             st.error(f"Failed to load data: {response.status_code}")
@@ -972,48 +988,11 @@ def main():
         help="What type of venue is this?"
     )
     
-    # GPS SECTION
-    st.markdown("#### 📍 Location Information")
-    st.info("📱 For demo purposes, enter GPS coordinates manually. In the mobile app, this would be automatic.")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        latitude = st.number_input(
-            "Latitude", 
-            value=40.7128, 
-            format="%.6f", 
-            help="GPS latitude coordinate"
-        )
-    with col2:
-        longitude = st.number_input(
-            "Longitude", 
-            value=-74.0060, 
-            format="%.6f", 
-            help="GPS longitude coordinate"
-        )
-    with col3:
-        gps_accuracy = st.number_input(
-            "GPS Accuracy (meters)", 
-            value=5.0, 
-            min_value=1.0, 
-            max_value=100.0, 
-            help="GPS accuracy in meters"
-        )
-    
-    # Show popular NYC venue coordinates as examples
-    with st.expander("📍 Popular NYC Venues (for testing)", expanded=False):
-        st.markdown("""
-        **Lower East Side Examples:**
-        - The Delancey: 40.7188, -73.9886
-        - Kind Regards: 40.7215, -73.9898
-        - Bar Goto: 40.7223, -73.9901
-        - Attaboy: 40.7202, -73.9892
-        
-        **Other NYC Areas:**
-        - Times Square: 40.7580, -73.9855
-        - Brooklyn Bridge: 40.7061, -73.9969
-        - Central Park: 40.7829, -73.9654
-        """)
+    # HIDDEN GPS DATA - Auto-generated for demo (in production would be from device GPS)
+    # Default to NYC coordinates with small random variation
+    latitude = 40.7128 + np.random.uniform(-0.01, 0.01)
+    longitude = -74.0060 + np.random.uniform(-0.01, 0.01)
+    gps_accuracy = np.random.uniform(3.0, 8.0)
     
     uploaded_file = st.file_uploader(
         "📱 Choose Video File", 
