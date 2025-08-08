@@ -285,6 +285,7 @@ def load_all_results():
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json"
         }
         
         # First, try to get just basic info
@@ -303,13 +304,13 @@ def load_all_results():
             if len(data) > 0:
                 st.write("🔍 Sample record:", data[0])
                 
-            # If basic query works, try full query
-            if len(data) > 0:
+                # If basic query works, try full query
                 full_response = requests.get(
                     f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc",
                     headers=headers
                 )
                 if full_response.status_code == 200:
+                    st.success(f"✅ Successfully loaded {len(full_response.json())} records!")
                     return full_response.json()
                 else:
                     st.error(f"Full query failed: {full_response.status_code} - {full_response.text}")
@@ -319,6 +320,11 @@ def load_all_results():
             st.error(f"Failed to load data: {response.status_code}")
             if response.text:
                 st.error(f"Error details: {response.text}")
+                try:
+                    error_json = response.json()
+                    st.json(error_json)
+                except:
+                    st.write("Raw response:", response.text)
             return []
             
     except Exception as e:
