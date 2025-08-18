@@ -259,26 +259,65 @@ def save_to_supabase(results):
         return False
 
 def load_all_results():
-    """Load all results from Supabase database"""
+    """Load all results from Supabase database with detailed debugging"""
     try:
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json"
         }
         
+        # Debug: Show the request details
+        request_url = f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc"
+        st.write(f"🔍 **Debug**: Requesting: `{request_url}`")
+        
+        # Add timeout and retry logic
         response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc",
-            headers=headers
+            request_url,
+            headers=headers,
+            timeout=10  # 10 second timeout
         )
         
+        # Debug: Show response details
+        st.write(f"🔍 **Debug**: Response Status: `{response.status_code}`")
+        st.write(f"🔍 **Debug**: Response Headers: `{dict(response.headers)}`")
+        
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            st.write(f"🔍 **Debug**: Raw response length: `{len(data)}`")
+            
+            if len(data) > 0:
+                st.write(f"🔍 **Debug**: First record keys: `{list(data[0].keys())}`")
+                st.write(f"🔍 **Debug**: Sample record:")
+                st.json(data[0])
+            
+            st.success(f"✅ Successfully loaded {len(data)} records from database!")
+            return data
         else:
-            st.error(f"Failed to load data: {response.status_code}")
+            st.error(f"❌ Failed to load data: HTTP {response.status_code}")
+            st.write(f"🔍 **Debug**: Response text: `{response.text}`")
+            st.info("💡 This might be a temporary connectivity issue. Try refreshing in a moment.")
             return []
             
+    except requests.exceptions.ConnectionError as e:
+        st.error("🌐 **Connection Error**: Unable to reach the database")
+        st.write(f"🔍 **Debug**: Connection error details: `{str(e)}`")
+        st.info("💡 **Possible solutions:**\n- Check your internet connection\n- Try refreshing the page\n- The database service might be temporarily unavailable")
+        return []
+    except requests.exceptions.Timeout as e:
+        st.error("⏱️ **Timeout Error**: Database request took too long")
+        st.write(f"🔍 **Debug**: Timeout error details: `{str(e)}`")
+        st.info("💡 Try refreshing - the database might be slow to respond")
+        return []
+    except requests.exceptions.RequestException as e:
+        st.error(f"🔌 **Network Error**: {str(e)}")
+        st.write(f"🔍 **Debug**: Request error details: `{str(e)}`")
+        st.info("💡 There seems to be a network connectivity issue")
+        return []
     except Exception as e:
-        st.error(f"Database error: {str(e)}")
+        st.error(f"❌ **Unexpected Error**: {str(e)}")
+        st.write(f"🔍 **Debug**: Unexpected error details: `{str(e)}`")
+        st.info("💡 Please try refreshing the page")
         return []
 
 def calculate_energy_score(results):
@@ -655,7 +694,54 @@ def main():
             if st.button("🔄 Refresh", use_container_width=True):
                 st.rerun()
         
-        all_results = load_all_results()
+        # Add a test connection button and debug tools
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("🔧 Test Connection", use_container_width=True):
+                with st.spinner("Testing connection..."):
+                    try:
+                        test_response = requests.get(f"{SUPABASE_URL}/rest/v1/", timeout=5)
+                        if test_response.status_code in [200, 404]:  # 404 is OK for base URL
+                            st.success("✅ Database connection is working!")
+                        else:
+                            st.error(f"❌ Database responded with status: {test_response.status_code}")
+                    except Exception as e:
+                        st.error(f"❌ Connection test failed: {str(e)}")
+        
+        with col2:
+            if st.button("🔍 Debug Mode", use_container_width=True):
+                st.session_state.debug_db = not st.session_state.get('debug_db', False)
+                if st.session_state.get('debug_db', False):
+                    st.success("🔍 Debug mode ON")
+                else:
+                    st.info("Debug mode OFF")
+        
+        with col3:
+            if st.button("📊 Check Table Info", use_container_width=True):
+                with st.spinner("Checking table structure..."):
+                    try:
+                        headers = {
+                            "apikey": SUPABASE_KEY,
+                            "Authorization": f"Bearer {SUPABASE_KEY}",
+                        }
+                        # Get table info
+                        response = requests.get(f"{SUPABASE_URL}/rest/v1/video_results?limit=1", headers=headers, timeout=5)
+                        st.write(f"Table check status: {response.status_code}")
+                        if response.status_code == 200:
+                            data = response.json()
+                            st.write(f"Sample record count: {len(data)}")
+                            if len(data) > 0:
+                                st.write("Available columns:", list(data[0].keys()))
+                    except Exception as e:
+                        st.error(f"Table check failed: {str(e)}")
+        
+        # Load results with optional debug info
+        if st.session_state.get('debug_db', False):
+            st.markdown("#### 🔍 Debug Information")
+            with st.expander("Database Debug Details", expanded=True):
+                all_results = load_all_results()
+        else:
+            all_results = load_all_results()
         
         if all_results:
             # Mobile-friendly summary cards
@@ -776,10 +862,72 @@ def main():
         else:
             st.markdown("""
             <div style="text-align: center; padding: 3rem;">
-                <h3>📱 No videos yet!</h3>
-                <p>Upload some venue videos to see analytics here.</p>
+                <h3>📱 No videos in database yet!</h3>
+                <p>This could mean:</p>
+                <ul style="text-align: left; max-width: 400px; margin: 0 auto;">
+                    <li>🆕 No videos have been uploaded yet</li>
+                    <li>🌐 Temporary database connectivity issue</li>
+                    <li>⏱️ Database service is starting up</li>
+                </ul>
+                <p><strong>Try:</strong></p>
+                <p>1. Upload a video first using "📤 Upload Videos"</p>
+                <p>2. Use the "🔧 Test Database Connection" button above</p>
+                <p>3. Refresh this page in a few moments</p>
             </div>
             """, unsafe_allow_html=True)
+            
+            # Show sample data for demo purposes
+            st.markdown("---")
+            st.markdown("### 📊 Demo Data (Sample Results)")
+            st.info("Since no database results are available, here's what the analytics would look like:")
+            
+            # Create sample demo data
+            demo_data = []
+            venues = ["The Rooftop Bar", "Club Voltage", "Midnight Lounge", "Beat Drop", "Vibe Central"]
+            types = ["Bar", "Club", "Lounge", "Club", "Bar"]
+            
+            for i, (venue, venue_type) in enumerate(zip(venues, types)):
+                demo_data.append({
+                    "Date": "2024-08-18",
+                    "Venue": venue,
+                    "Type": venue_type,
+                    "User": f"Demo{i+1}",
+                    "Lat": 40.7128 + np.random.uniform(-0.01, 0.01),
+                    "Lon": -74.0060 + np.random.uniform(-0.01, 0.01),
+                    "Verified": "✅" if i % 2 == 0 else "❌",
+                    "BPM": np.random.randint(90, 140),
+                    "Volume": np.random.randint(60, 95),
+                    "Crowd": np.random.choice(["Light", "Moderate", "Busy", "Packed"]),
+                    "Mood": np.random.choice(["Happy", "Excited", "Energetic", "Social"]),
+                    "Energy Score": round(np.random.uniform(45, 95), 1)
+                })
+            
+            demo_df = pd.DataFrame(demo_data)
+            
+            # Demo stats
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("📊 Demo Videos", len(demo_df))
+            with col2:
+                st.metric("⚡ Avg Energy", f"{demo_df['Energy Score'].mean():.1f}")
+            with col3:
+                st.metric("🏢 Demo Venues", demo_df["Venue"].nunique())
+            with col4:
+                st.metric("✅ Verified", len([x for x in demo_df["Verified"] if x == "✅"]))
+            
+            # Demo table
+            st.markdown("#### 📋 Demo Results Table")
+            st.dataframe(demo_df, use_container_width=True, hide_index=True)
+            
+            # Demo chart
+            st.markdown("#### 📊 Demo Analytics")
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.hist(demo_df["Energy Score"], bins=8, alpha=0.8, color='#667eea', edgecolor='white', linewidth=1)
+            ax.set_xlabel("Energy Score", fontsize=12)
+            ax.set_ylabel("Number of Venues", fontsize=12)
+            ax.set_title("Demo: Energy Score Distribution", fontsize=16, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
         
         return
     
