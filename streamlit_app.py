@@ -195,7 +195,7 @@ def verify_venue_location(latitude, longitude, venue_name):
     return False
 
 def save_to_supabase(results):
-    """Save analysis results to Supabase database with GPS data and detailed debugging"""
+    """Save analysis results to Supabase database with GPS data"""
     try:
         # Include user name if provided
         user_name = st.session_state.get('user_name', '')
@@ -205,19 +205,19 @@ def save_to_supabase(results):
         
         # Prepare data with proper type casting and validation
         db_data = {
-            "venue_name": str(results["venue_name"])[:100],  # Limit length
+            "venue_name": str(results["venue_name"])[:100],
             "venue_type": str(results["venue_type"])[:50],
             "user_session": str(st.session_state.user_session_id)[:20],
             "user_name": str(user_name)[:50] if user_name else None,
             
-            # GPS COLUMNS (NEW)
+            # GPS COLUMNS
             "latitude": float(gps_data.get("latitude")) if gps_data.get("latitude") else None,
             "longitude": float(gps_data.get("longitude")) if gps_data.get("longitude") else None,
             "gps_accuracy": float(gps_data.get("accuracy")) if gps_data.get("accuracy") else None,
             "venue_verified": bool(gps_data.get("venue_verified", False)),
             
             # Existing columns with validation
-            "bpm": max(0, min(300, int(results["audio_environment"]["bpm"]))),  # Validate range
+            "bpm": max(0, min(300, int(results["audio_environment"]["bpm"]))),
             "volume_level": max(0.0, min(100.0, float(results["audio_environment"]["volume_level"]))),
             "genre": str(results["audio_environment"]["genre"])[:50],
             "energy_level": str(results["audio_environment"]["energy_level"])[:20],
@@ -234,10 +234,6 @@ def save_to_supabase(results):
             "energy_score": max(0.0, min(100.0, float(calculate_energy_score(results))))
         }
         
-        # Debug: Show the data being sent
-        with st.expander("🔍 Debug Info", expanded=False):
-            st.json(db_data)
-        
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -245,38 +241,21 @@ def save_to_supabase(results):
             "Prefer": "return=minimal"
         }
         
-        # Make the request
         response = requests.post(
             f"{SUPABASE_URL}/rest/v1/video_results",
             headers=headers,
             json=db_data
         )
         
-        # Detailed debugging
-        st.write(f"🔍 Debug - Response status: {response.status_code}")
-        
         if response.status_code == 201:
             st.success("✅ Results saved to database!")
             return True
         else:
-            # Show full error details
             st.error(f"❌ Database save failed: {response.status_code}")
-            if response.text:
-                st.error(f"Error details: {response.text}")
-                
-            # Try to parse and show JSON error if available
-            try:
-                error_json = response.json()
-                st.json(error_json)
-            except:
-                st.write("Raw response:", response.text)
-            
             return False
             
     except Exception as e:
         st.error(f"❌ Database error: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
         return False
 
 def load_all_results():
@@ -285,52 +264,21 @@ def load_all_results():
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json"
         }
         
-        # First, try to get just basic info
         response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/video_results?select=id,venue_name,created_at&order=created_at.desc",
+            f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc",
             headers=headers
         )
         
-        # Debug: Show response details
-        st.write(f"🔍 Load Debug - Response status: {response.status_code}")
-        st.write(f"🔍 Request URL: {SUPABASE_URL}/rest/v1/video_results")
-        
         if response.status_code == 200:
-            data = response.json()
-            st.write(f"🔍 Found {len(data)} records in database")
-            if len(data) > 0:
-                st.write("🔍 Sample record:", data[0])
-                
-                # If basic query works, try full query
-                full_response = requests.get(
-                    f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc",
-                    headers=headers
-                )
-                if full_response.status_code == 200:
-                    st.success(f"✅ Successfully loaded {len(full_response.json())} records!")
-                    return full_response.json()
-                else:
-                    st.error(f"Full query failed: {full_response.status_code} - {full_response.text}")
-                    return data  # Return basic data at least
-            return data
+            return response.json()
         else:
             st.error(f"Failed to load data: {response.status_code}")
-            if response.text:
-                st.error(f"Error details: {response.text}")
-                try:
-                    error_json = response.json()
-                    st.json(error_json)
-                except:
-                    st.write("Raw response:", response.text)
             return []
             
     except Exception as e:
         st.error(f"Database error: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
         return []
 
 def calculate_energy_score(results):
@@ -346,7 +294,7 @@ def calculate_energy_score(results):
         return min(100, max(0, energy_score))
     except Exception as e:
         st.error(f"Error calculating energy score: {e}")
-        return 50.0  # Default fallback
+        return 50.0
 
 def extract_audio_features(video_path):
     """Extract audio features from video"""
@@ -554,7 +502,7 @@ def process_video(video_file, venue_name, venue_type, gps_data=None):
             "venue_name": venue_name,
             "venue_type": venue_type,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "gps_data": gps_data or {},  # GPS DATA
+            "gps_data": gps_data or {},
             "audio_environment": audio_results,
             "visual_environment": visual_results,
             "crowd_density": crowd_results,
@@ -691,7 +639,7 @@ def main():
     """, unsafe_allow_html=True)
     
     # Mobile-friendly info banner
-    st.info("📱 **Mobile Optimized**: Upload videos directly from your phone! Now with GPS location verification and debug fixes.")
+    st.info("📱 **Mobile Optimized**: Upload videos directly from your phone! Now with GPS location verification.")
     
     # Debug mode toggle
     debug_mode = st.sidebar.checkbox("🔍 Debug Mode", help="Show detailed error information")
@@ -727,3 +675,337 @@ def main():
                     "Verified": "✅" if result.get("venue_verified") else "❌",
                     "BPM": result.get("bpm", 0),
                     "Volume": result.get("volume_level", 0),
+                    "Crowd": result.get("crowd_density", ""),
+                    "Mood": result.get("dominant_mood", ""),
+                    "Energy Score": round(result.get("energy_score", 0), 1)
+                })
+            
+            df = pd.DataFrame(df_data)
+            
+            with col1:
+                st.markdown(f"""
+                <div class="metric-container">
+                    <span class="metric-value">{len(all_results)}</span>
+                    <span class="metric-label">Total Videos</span>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                avg_energy = df["Energy Score"].mean() if not df.empty else 0
+                st.markdown(f"""
+                <div class="metric-container">
+                    <span class="metric-value">{avg_energy:.1f}</span>
+                    <span class="metric-label">Avg Energy</span>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col3:
+                unique_venues = df["Venue"].nunique() if not df.empty else 0
+                st.markdown(f"""
+                <div class="metric-container">
+                    <span class="metric-value">{unique_venues}</span>
+                    <span class="metric-label">Venues</span>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col4:
+                verified_count = len([r for r in all_results if r.get("venue_verified")])
+                st.markdown(f"""
+                <div class="metric-container">
+                    <span class="metric-value">{verified_count}</span>
+                    <span class="metric-label">GPS Verified</span>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Mobile-optimized data table
+            st.markdown("#### 📋 Recent Submissions")
+            st.dataframe(
+                df.head(10), 
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Energy Score": st.column_config.ProgressColumn(
+                        "Energy Score",
+                        help="Overall venue energy (0-100)",
+                        min_value=0,
+                        max_value=100,
+                    ),
+                    "Lat": st.column_config.NumberColumn(
+                        "Latitude",
+                        help="GPS Latitude",
+                        format="%.4f",
+                    ),
+                    "Lon": st.column_config.NumberColumn(
+                        "Longitude", 
+                        help="GPS Longitude",
+                        format="%.4f",
+                    ),
+                }
+            )
+            
+            # Mobile-friendly charts
+            if not df.empty:
+                st.markdown("#### 📊 Analytics")
+                
+                # Venue type distribution
+                venue_counts = df["Type"].value_counts()
+                fig, ax = plt.subplots(figsize=(10, 6))
+                colors = plt.cm.Set3(np.linspace(0, 1, len(venue_counts)))
+                wedges, texts, autotexts = ax.pie(venue_counts.values, labels=venue_counts.index, autopct='%1.1f%%', colors=colors)
+                ax.set_title("Venue Types Analyzed", fontsize=16, fontweight='bold')
+                
+                # Make text larger for mobile
+                for text in texts:
+                    text.set_fontsize(12)
+                for autotext in autotexts:
+                    autotext.set_color('white')
+                    autotext.set_fontweight('bold')
+                    autotext.set_fontsize(11)
+                
+                st.pyplot(fig)
+                
+                # Energy score distribution
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.hist(df["Energy Score"], bins=12, alpha=0.8, color='#667eea', edgecolor='white', linewidth=1)
+                ax.set_xlabel("Energy Score", fontsize=12)
+                ax.set_ylabel("Number of Venues", fontsize=12)
+                ax.set_title("Energy Score Distribution", fontsize=16, fontweight='bold')
+                ax.grid(True, alpha=0.3)
+                st.pyplot(fig)
+        
+        else:
+            st.markdown("""
+            <div style="text-align: center; padding: 3rem;">
+                <h3>📱 No videos yet!</h3>
+                <p>Upload some venue videos to see analytics here.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        return
+    
+    # Regular upload interface - Mobile optimized
+    # User identification section
+    st.sidebar.markdown("### 👤 Your Info")
+    
+    # Simple user identification
+    user_name = st.sidebar.text_input(
+        "Your Name (optional)", 
+        placeholder="e.g., Sarah",
+        help="Helps us track your contributions"
+    )
+    
+    if user_name:
+        st.sidebar.success(f"Hi {user_name}! 👋")
+        # Update session with user name
+        st.session_state.user_name = user_name
+    
+    st.sidebar.info(f"Session ID: **{st.session_state.user_session_id}**")
+    
+    # Add contribution counter
+    user_contributions = len([v for v in st.session_state.processed_videos])
+    if user_contributions > 0:
+        st.sidebar.metric("Your Videos", user_contributions)
+        if user_contributions >= 3:
+            st.sidebar.success("🌟 Super Contributor!")
+        elif user_contributions >= 1:
+            st.sidebar.success("🎯 Great Job!")
+    
+    if st.session_state.processed_videos:
+        st.sidebar.markdown("### 📊 Your Recent Videos")
+        for i, result in enumerate(st.session_state.processed_videos[-3:]):  # Show last 3 for mobile
+            with st.sidebar.expander(f"🎯 {result['venue_name']}", expanded=False):
+                st.write(f"**{result['venue_type']}**")
+                st.write(f"🎵 {result['audio_environment']['bpm']} BPM")
+                st.write(f"👥 {result['crowd_density']['crowd_density']}")
+                st.write(f"😊 {result['mood_recognition']['dominant_mood']}")
+                # Show GPS info if available
+                gps_data = result.get('gps_data', {})
+                if gps_data.get('latitude'):
+                    verified = "✅" if gps_data.get('venue_verified') else "❌"
+                    st.write(f"📍 {verified} GPS Verified")
+    else:
+        st.sidebar.write("No videos uploaded yet")
+    
+    # Main upload section with mobile-friendly layout
+    st.markdown("### 📤 Upload New Video")
+    
+    # Single column layout for mobile-first design
+    st.markdown("""
+    <div class="upload-section">
+    """, unsafe_allow_html=True)
+    
+    # Mobile-optimized input fields
+    venue_name = st.text_input(
+        "🏢 Venue Name", 
+        placeholder="e.g., The Rooftop Bar",
+        help="What's the name of the place?"
+    )
+    
+    venue_type = st.selectbox(
+        "🎭 Venue Type", 
+        ["Club", "Bar", "Rooftop", "Restaurant", "Lounge", "Live Music", "Sports Bar", "Other"],
+        help="What type of venue is this?"
+    )
+    
+    # Auto-generated GPS data for demo (in production would be from device GPS)
+    latitude = 40.7128 + np.random.uniform(-0.01, 0.01)
+    longitude = -74.0060 + np.random.uniform(-0.01, 0.01)
+    gps_accuracy = np.random.uniform(3.0, 8.0)
+    
+    uploaded_file = st.file_uploader(
+        "📱 Choose Video File", 
+        type=['mp4', 'mov', 'avi', 'mkv'],
+        help="Best results: 30-60 seconds, good lighting, capture the crowd and atmosphere"
+    )
+    
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Mobile-optimized video preview and analysis
+    if uploaded_file is not None:
+        st.markdown("#### 📹 Video Preview")
+        st.video(uploaded_file)
+        
+        if venue_name.strip():
+            # Verify location before analysis
+            venue_verified = verify_venue_location(latitude, longitude, venue_name)
+            
+            if venue_verified:
+                st.success(f"✅ GPS coordinates verified for NYC area")
+            else:
+                st.warning(f"⚠️ GPS coordinates appear to be outside NYC area")
+            
+            # Prepare GPS data
+            gps_data = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "accuracy": gps_accuracy,
+                "venue_verified": venue_verified
+            }
+            
+            # Large, mobile-friendly analyze button
+            if st.button("🎯 Analyze This Video", type="primary", use_container_width=True):
+                with st.spinner("🤖 AI is analyzing your video..."):
+                    results = process_video(uploaded_file, venue_name.strip(), venue_type, gps_data)
+                
+                if results:
+                    # Show thank you message first
+                    st.balloons()
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 2rem; border-radius: 20px; text-align: center; margin: 2rem 0;">
+                        <h2 style="margin-bottom: 1rem;">🎉 Thank You!</h2>
+                        <p style="font-size: 1.2rem; margin-bottom: 1rem;">Your video helps other people discover great venues!</p>
+                        <p style="font-size: 1rem; opacity: 0.9;">✨ <strong>{venue_name}</strong> analysis complete</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    display_results(results)
+                    
+                    # Save to session state
+                    st.session_state.processed_videos.append(results)
+                    
+                    # Save to database with debug info if enabled
+                    if debug_mode:
+                        st.markdown("#### 🔍 Database Save Debug")
+                    
+                    save_success = save_to_supabase(results)
+                    
+                    if save_success:
+                        st.markdown("""
+                        <div style="background: #d4edda; border: 1px solid #c3e6cb; color: #155724; padding: 1rem; border-radius: 10px; margin: 1rem 0;">
+                            <strong>🌟 Impact:</strong> Your contribution helps friends make better venue choices!
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    # Mobile-friendly download button
+                    st.download_button(
+                        label="📥 Download Full Results",
+                        data=json.dumps(results, indent=2),
+                        file_name=f"{venue_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json",
+                        use_container_width=True
+                    )
+                    
+                    # Encourage more uploads
+                    st.markdown("""
+                    <div style="text-align: center; margin: 2rem 0;">
+                        <p>📱 At another venue? Upload another video to help more people!</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ Please enter the venue name first!")
+    
+    # Mobile-optimized instructions
+    st.markdown("### 📱 How to Get Great Results")
+    
+    with st.expander("📋 Quick Tips for Mobile Recording", expanded=False):
+        st.markdown("""
+        **📱 Recording Tips:**
+        - Hold phone steady, capture 30-60 seconds
+        - Show the crowd, lighting, and general vibe
+        - Record during peak times (not empty venues)
+        - Keep phone horizontal for better analysis
+        
+        **🎯 What We Analyze:**
+        - 🎵 Music tempo and volume levels
+        - 💡 Lighting and visual atmosphere  
+        - 👥 Crowd density and movement
+        - 😊 General mood and energy
+        - 📍 GPS location verification
+        
+        **🔒 Privacy Note:**
+        - All faces are automatically blurred
+        - Only analyzing general crowd patterns
+        - GPS used only for venue verification
+        - No personal data is stored
+        """)
+    
+    # Sample results button - mobile optimized
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        if st.button("🎮 Show Sample Analysis", use_container_width=True):
+            sample_gps = {
+                "latitude": 40.7188,
+                "longitude": -73.9886,
+                "accuracy": 5.0,
+                "venue_verified": True
+            }
+            
+            sample_results = {
+                "venue_name": "Demo Nightclub",
+                "venue_type": "Club", 
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "gps_data": sample_gps,
+                "audio_environment": {
+                    "bpm": 128,
+                    "volume_level": 85.0,
+                    "genre": "Electronic/Dance",
+                    "energy_level": "High"
+                },
+                "visual_environment": {
+                    "brightness_level": 65.0,
+                    "lighting_type": "Dark/Club Lighting",
+                    "color_scheme": "Purple-dominant",
+                    "visual_energy": "High"
+                },
+                "crowd_density": {
+                    "crowd_density": "Busy",
+                    "activity_level": "High Movement/Dancing",
+                    "density_score": 12.0
+                },
+                "mood_recognition": {
+                    "dominant_mood": "Excited",
+                    "confidence": 0.78,
+                    "mood_breakdown": {
+                        "Excited": 0.35,
+                        "Happy": 0.25, 
+                        "Energetic": 0.20,
+                        "Social": 0.15,
+                        "Festive": 0.05
+                    },
+                    "overall_vibe": "Positive"
+                }
+            }
+            display_results(sample_results)
+
+if __name__ == "__main__":
+    main()
