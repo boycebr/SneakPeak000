@@ -525,33 +525,37 @@ def display_all_results_page():
         # Add a search bar
         search_term = st.text_input("Search videos by venue name...", "")
         
-        filtered_videos = [v for v in all_videos if search_term.lower() in v['venue_name'].lower()]
+        filtered_videos = [v for v in all_videos if search_term.lower() in v.get('venue_name', '').lower()]
         
         if not filtered_videos:
             st.info("No videos match your search criteria.")
         
         # Display each video result
         for video_data in filtered_videos:
-            with st.expander(f"**{video_data['venue_name']}** ({video_data['venue_type']}) - {video_data['created_at'][:10]}"):
-                
-                # Use a unique key for the video player
-                st.video("https://www.youtube.com/watch?v=dQw4w9WgXcQ", start_time=10, key=video_data['id'])
-                
-                # Display key metrics
-                col_m1, col_m2 = st.columns(2)
-                col_m1.metric("Overall Vibe", video_data.get('overall_vibe', 'N/A'))
-                col_m2.metric("Energy Score", f"{video_data.get('energy_score', 0):.2f}/100")
-                
-                # Add a rating slider and a button to rate the video
-                rating = st.slider(f"Rate this video (1-5):", 1, 5, 3, key=f"slider_{video_data['id']}")
-                if st.button(f"Submit Rating for {video_data['venue_name']}", key=f"button_{video_data['id']}"):
-                    if save_user_rating(video_data['id'], st.session_state.user_session_id, rating, video_data['venue_name'], video_data['venue_type']):
-                        st.success("Your rating has been submitted!")
-                    else:
-                        st.error("There was an error submitting your rating.")
-                        
-                # Display detailed data (optional)
-                st.json(video_data)
+            # Add a check to ensure video data is complete before displaying
+            if 'id' in video_data and video_data['id']:
+                with st.expander(f"**{video_data['venue_name']}** ({video_data['venue_type']}) - {video_data['created_at'][:10]}"):
+                    
+                    # Use a unique key for the video player
+                    st.video("https://www.youtube.com/watch?v=dQw4w9WgXcQ", start_time=10, key=video_data['id'])
+                    
+                    # Display key metrics
+                    col_m1, col_m2 = st.columns(2)
+                    col_m1.metric("Overall Vibe", video_data.get('overall_vibe', 'N/A'))
+                    col_m2.metric("Energy Score", f"{video_data.get('energy_score', 0):.2f}/100")
+                    
+                    # Add a rating slider and a button to rate the video
+                    rating = st.slider(f"Rate this video (1-5):", 1, 5, 3, key=f"slider_{video_data['id']}")
+                    if st.button(f"Submit Rating for {video_data['venue_name']}", key=f"button_{video_data['id']}"):
+                        if save_user_rating(video_data['id'], st.session_state.user_session_id, rating, video_data['venue_name'], video_data['venue_type']):
+                            st.success("Your rating has been submitted!")
+                        else:
+                            st.error("There was an error submitting your rating.")
+                            
+                    # Display detailed data (optional)
+                    st.json(video_data)
+            else:
+                st.error("❌ A video record was found but is missing a unique ID. Skipping display.")
                 
     else:
         st.info("There are no videos in the database. Please upload one first!")
