@@ -537,7 +537,7 @@ def display_all_results_page():
                 with st.expander(f"**{video_data['venue_name']}** ({video_data['venue_type']}) - {video_data['created_at'][:10]}"):
                     
                     # Use a unique key for the video player
-                    st.video("https://www.youtube.com/watch?v=dQw4w9WgXcQ", start_time=10, key=video_data['id'])
+                    st.video("https://www.youtube.com/watch?v=dQw4w9WgXcQ", start_time=10)
                     
                     # Display key metrics
                     col_m1, col_m2 = st.columns(2)
