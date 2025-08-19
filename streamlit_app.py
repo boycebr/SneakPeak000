@@ -696,7 +696,7 @@ def main():
     # Debug mode toggle
     debug_mode = st.sidebar.checkbox("🔍 Debug Mode", help="Show detailed error information")
     
-    # Navigation with new Rate Venues option
+    # Navigation with new Rate Venues option - THIS IS THE KEY LINE
     view_mode = st.sidebar.radio("📋 Choose Mode", ["🎯 Rate Venues", "📤 Upload Videos", "📊 View All Results"], index=0)
     
     # NEW: Rate Venues Section
