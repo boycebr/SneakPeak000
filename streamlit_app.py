@@ -194,8 +194,37 @@ def verify_venue_location(latitude, longitude, venue_name):
             return True
     return False
 
+def save_user_rating(venue_id, user_session, rating, venue_name, venue_type):
+    """Save a user's rating of a venue"""
+    try:
+        rating_data = {
+            "venue_id": str(venue_id),
+            "user_session": str(user_session)[:20],
+            "rating": int(rating),
+            "venue_name": str(venue_name)[:100],
+            "venue_type": str(venue_type)[:50],
+            "rated_at": datetime.now().isoformat()
+        }
+        
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(
+            f"{SUPABASE_URL}/rest/v1/user_ratings",
+            headers=headers,
+            json=rating_data
+        )
+        
+        return response.status_code == 201
+    except Exception as e:
+        st.error(f"Error saving rating: {str(e)}")
+        return False
+
 def save_to_supabase(results):
-    """Save analysis results to Supabase database with GPS data"""
+    """Save analysis results to Supabase database with GPS data and detailed debugging"""
     try:
         # Include user name if provided
         user_name = st.session_state.get('user_name', '')
@@ -205,7 +234,7 @@ def save_to_supabase(results):
         
         # Prepare data with proper type casting and validation
         db_data = {
-            "venue_name": str(results["venue_name"])[:100],
+            "venue_name": str(results["venue_name"])[:100],  # Limit length
             "venue_type": str(results["venue_type"])[:50],
             "user_session": str(st.session_state.user_session_id)[:20],
             "user_name": str(user_name)[:50] if user_name else None,
@@ -217,7 +246,7 @@ def save_to_supabase(results):
             "venue_verified": bool(gps_data.get("venue_verified", False)),
             
             # Existing columns with validation
-            "bpm": max(0, min(300, int(results["audio_environment"]["bpm"]))),
+            "bpm": max(0, min(300, int(results["audio_environment"]["bpm"]))),  # Validate range
             "volume_level": max(0.0, min(100.0, float(results["audio_environment"]["volume_level"]))),
             "genre": str(results["audio_environment"]["genre"])[:50],
             "energy_level": str(results["audio_environment"]["energy_level"])[:20],
@@ -234,6 +263,10 @@ def save_to_supabase(results):
             "energy_score": max(0.0, min(100.0, float(calculate_energy_score(results))))
         }
         
+        # Debug: Show the data being sent
+        with st.expander("🔍 Debug Info", expanded=False):
+            st.json(db_data)
+        
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -241,25 +274,42 @@ def save_to_supabase(results):
             "Prefer": "return=minimal"
         }
         
+        # Make the request
         response = requests.post(
             f"{SUPABASE_URL}/rest/v1/video_results",
             headers=headers,
             json=db_data
         )
         
+        # Detailed debugging
+        st.write(f"🔍 Debug - Response status: {response.status_code}")
+        
         if response.status_code == 201:
             st.success("✅ Results saved to database!")
             return True
         else:
+            # Show full error details
             st.error(f"❌ Database save failed: {response.status_code}")
+            if response.text:
+                st.error(f"Error details: {response.text}")
+                
+            # Try to parse and show JSON error if available
+            try:
+                error_json = response.json()
+                st.json(error_json)
+            except:
+                st.write("Raw response:", response.text)
+            
             return False
             
     except Exception as e:
         st.error(f"❌ Database error: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return False
 
 def load_all_results():
-    """Load all results from Supabase database with detailed debugging"""
+    """Load all results from Supabase database"""
     try:
         headers = {
             "apikey": SUPABASE_KEY,
@@ -267,57 +317,20 @@ def load_all_results():
             "Content-Type": "application/json"
         }
         
-        # Debug: Show the request details
-        request_url = f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc"
-        st.write(f"🔍 **Debug**: Requesting: `{request_url}`")
-        
-        # Add timeout and retry logic
         response = requests.get(
-            request_url,
-            headers=headers,
-            timeout=10  # 10 second timeout
+            f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc",
+            headers=headers
         )
-        
-        # Debug: Show response details
-        st.write(f"🔍 **Debug**: Response Status: `{response.status_code}`")
-        st.write(f"🔍 **Debug**: Response Headers: `{dict(response.headers)}`")
         
         if response.status_code == 200:
             data = response.json()
-            st.write(f"🔍 **Debug**: Raw response length: `{len(data)}`")
-            
-            if len(data) > 0:
-                st.write(f"🔍 **Debug**: First record keys: `{list(data[0].keys())}`")
-                st.write(f"🔍 **Debug**: Sample record:")
-                st.json(data[0])
-            
-            st.success(f"✅ Successfully loaded {len(data)} records from database!")
             return data
         else:
-            st.error(f"❌ Failed to load data: HTTP {response.status_code}")
-            st.write(f"🔍 **Debug**: Response text: `{response.text}`")
-            st.info("💡 This might be a temporary connectivity issue. Try refreshing in a moment.")
+            st.error(f"Failed to load data: {response.status_code}")
             return []
             
-    except requests.exceptions.ConnectionError as e:
-        st.error("🌐 **Connection Error**: Unable to reach the database")
-        st.write(f"🔍 **Debug**: Connection error details: `{str(e)}`")
-        st.info("💡 **Possible solutions:**\n- Check your internet connection\n- Try refreshing the page\n- The database service might be temporarily unavailable")
-        return []
-    except requests.exceptions.Timeout as e:
-        st.error("⏱️ **Timeout Error**: Database request took too long")
-        st.write(f"🔍 **Debug**: Timeout error details: `{str(e)}`")
-        st.info("💡 Try refreshing - the database might be slow to respond")
-        return []
-    except requests.exceptions.RequestException as e:
-        st.error(f"🔌 **Network Error**: {str(e)}")
-        st.write(f"🔍 **Debug**: Request error details: `{str(e)}`")
-        st.info("💡 There seems to be a network connectivity issue")
-        return []
     except Exception as e:
-        st.error(f"❌ **Unexpected Error**: {str(e)}")
-        st.write(f"🔍 **Debug**: Unexpected error details: `{str(e)}`")
-        st.info("💡 Please try refreshing the page")
+        st.error(f"Database error: {str(e)}")
         return []
 
 def calculate_energy_score(results):
@@ -333,7 +346,7 @@ def calculate_energy_score(results):
         return min(100, max(0, energy_score))
     except Exception as e:
         st.error(f"Error calculating energy score: {e}")
-        return 50.0
+        return 50.0  # Default fallback
 
 def extract_audio_features(video_path):
     """Extract audio features from video"""
@@ -541,7 +554,7 @@ def process_video(video_file, venue_name, venue_type, gps_data=None):
             "venue_name": venue_name,
             "venue_type": venue_type,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "gps_data": gps_data or {},
+            "gps_data": gps_data or {},  # GPS DATA
             "audio_environment": audio_results,
             "visual_environment": visual_results,
             "crowd_density": crowd_results,
@@ -678,15 +691,118 @@ def main():
     """, unsafe_allow_html=True)
     
     # Mobile-friendly info banner
-    st.info("📱 **Mobile Optimized**: Upload videos directly from your phone! Now with GPS location verification.")
+    st.info("📱 **Real-Time Venue Intelligence**: Upload videos and rate venues to share live venue conditions!")
     
     # Debug mode toggle
     debug_mode = st.sidebar.checkbox("🔍 Debug Mode", help="Show detailed error information")
     
-    # Simplified mobile navigation
-    view_mode = st.sidebar.radio("📋 Choose Mode", ["📤 Upload Videos", "📊 View All Results"], index=0)
+    # Navigation with new Rate Venues option
+    view_mode = st.sidebar.radio("📋 Choose Mode", ["🎯 Rate Venues", "📤 Upload Videos", "📊 View All Results"], index=0)
     
-    if view_mode == "📊 View All Results":
+    # NEW: Rate Venues Section
+    if view_mode == "🎯 Rate Venues":
+        st.markdown("### 🎯 Rate Venues to Share Your Experience")
+        st.info("Help others by rating venues you see! Your ratings help build better real-time venue intelligence.")
+        
+        # Get all videos from database
+        all_results = load_all_results()
+        
+        if len(all_results) == 0:
+            st.warning("No venues available to rate yet. Upload some videos first!")
+            return
+        
+        # Show one venue at a time
+        if 'current_video_index' not in st.session_state:
+            st.session_state.current_video_index = 0
+        
+        current_video = all_results[st.session_state.current_video_index]
+        
+        # Display the venue info
+        st.markdown(f"## {current_video.get('venue_name', 'Unknown Venue')}")
+        st.markdown(f"**Type:** {current_video.get('venue_type', 'Unknown')} • **Uploaded:** {current_video.get('created_at', 'Unknown')[:10]}")
+        
+        # Show venue stats in a nice grid
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("🎵 BPM", current_video.get('bpm', 'N/A'))
+        with col2:
+            st.metric("👥 Crowd", current_video.get('crowd_density', 'N/A'))
+        with col3:
+            st.metric("⚡ Energy", f"{current_video.get('energy_score', 0):.0f}/100")
+        with col4:
+            st.metric("📍 GPS", "✅" if current_video.get('venue_verified') else "❌")
+        
+        # The rating question
+        st.markdown("### How would you rate this venue's vibe?")
+        st.markdown("*Rate based on the atmosphere, energy, and overall appeal shown in the data*")
+        
+        rating = st.slider("Rate from 1-10", 1, 10, 5, help="1 = Would never go, 10 = Perfect venue for me")
+        
+        # Navigation and save buttons
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("⬅️ Previous", use_container_width=True):
+                if st.session_state.current_video_index > 0:
+                    st.session_state.current_video_index -= 1
+                    st.rerun()
+        
+        with col2:
+            if st.button("💾 Save Rating", type="primary", use_container_width=True):
+                success = save_user_rating(
+                    venue_id=current_video.get('id', 'unknown'),
+                    user_session=st.session_state.user_session_id,
+                    rating=rating,
+                    venue_name=current_video.get('venue_name', 'Unknown'),
+                    venue_type=current_video.get('venue_type', 'Unknown')
+                )
+                
+                if success:
+                    st.success(f"✅ Saved rating of {rating}/10 for {current_video.get('venue_name', 'venue')}!")
+                    # Auto-advance to next venue
+                    if st.session_state.current_video_index < len(all_results) - 1:
+                        st.session_state.current_video_index += 1
+                        st.rerun()
+                else:
+                    st.error("❌ Failed to save rating. Please try again.")
+        
+        with col3:
+            if st.button("➡️ Next", use_container_width=True):
+                if st.session_state.current_video_index < len(all_results) - 1:
+                    st.session_state.current_video_index += 1
+                    st.rerun()
+                else:
+                    st.info("You've reached the last venue!")
+        
+        # Progress indicator
+        progress = (st.session_state.current_video_index + 1) / len(all_results)
+        st.progress(progress)
+        st.write(f"Venue {st.session_state.current_video_index + 1} of {len(all_results)}")
+        
+        # Show additional venue details
+        with st.expander("📊 Detailed Venue Analysis", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Audio Analysis:**")
+                st.write(f"• Volume: {current_video.get('volume_level', 'N/A')}/100")
+                st.write(f"• Genre: {current_video.get('genre', 'N/A')}")
+                st.write(f"• Energy Level: {current_video.get('energy_level', 'N/A')}")
+                
+                st.write("**Visual Analysis:**")
+                st.write(f"• Lighting: {current_video.get('lighting_type', 'N/A')}")
+                st.write(f"• Colors: {current_video.get('color_scheme', 'N/A')}")
+            
+            with col2:
+                st.write("**Crowd Analysis:**")
+                st.write(f"• Activity: {current_video.get('activity_level', 'N/A')}")
+                st.write(f"• Density Score: {current_video.get('density_score', 'N/A')}")
+                
+                st.write("**Mood Analysis:**")
+                st.write(f"• Dominant Mood: {current_video.get('dominant_mood', 'N/A')}")
+                st.write(f"• Overall Vibe: {current_video.get('overall_vibe', 'N/A')}")
+        
+        return
+
+    elif view_mode == "📊 View All Results":
         st.markdown("### 📊 All Venue Analysis Results")
         
         col1, col2 = st.columns([3, 1])
@@ -694,54 +810,7 @@ def main():
             if st.button("🔄 Refresh", use_container_width=True):
                 st.rerun()
         
-        # Add a test connection button and debug tools
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("🔧 Test Connection", use_container_width=True):
-                with st.spinner("Testing connection..."):
-                    try:
-                        test_response = requests.get(f"{SUPABASE_URL}/rest/v1/", timeout=5)
-                        if test_response.status_code in [200, 404]:  # 404 is OK for base URL
-                            st.success("✅ Database connection is working!")
-                        else:
-                            st.error(f"❌ Database responded with status: {test_response.status_code}")
-                    except Exception as e:
-                        st.error(f"❌ Connection test failed: {str(e)}")
-        
-        with col2:
-            if st.button("🔍 Debug Mode", use_container_width=True):
-                st.session_state.debug_db = not st.session_state.get('debug_db', False)
-                if st.session_state.get('debug_db', False):
-                    st.success("🔍 Debug mode ON")
-                else:
-                    st.info("Debug mode OFF")
-        
-        with col3:
-            if st.button("📊 Check Table Info", use_container_width=True):
-                with st.spinner("Checking table structure..."):
-                    try:
-                        headers = {
-                            "apikey": SUPABASE_KEY,
-                            "Authorization": f"Bearer {SUPABASE_KEY}",
-                        }
-                        # Get table info
-                        response = requests.get(f"{SUPABASE_URL}/rest/v1/video_results?limit=1", headers=headers, timeout=5)
-                        st.write(f"Table check status: {response.status_code}")
-                        if response.status_code == 200:
-                            data = response.json()
-                            st.write(f"Sample record count: {len(data)}")
-                            if len(data) > 0:
-                                st.write("Available columns:", list(data[0].keys()))
-                    except Exception as e:
-                        st.error(f"Table check failed: {str(e)}")
-        
-        # Load results with optional debug info
-        if st.session_state.get('debug_db', False):
-            st.markdown("#### 🔍 Debug Information")
-            with st.expander("Database Debug Details", expanded=True):
-                all_results = load_all_results()
-        else:
-            all_results = load_all_results()
+        all_results = load_all_results()
         
         if all_results:
             # Mobile-friendly summary cards
@@ -858,80 +927,35 @@ def main():
                 ax.set_title("Energy Score Distribution", fontsize=16, fontweight='bold')
                 ax.grid(True, alpha=0.3)
                 st.pyplot(fig)
+                
+                # GPS Verification chart
+                verification_data = df["Verified"].value_counts()
+                if len(verification_data) > 0:
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    colors = ['#28a745', '#dc3545']  # Green for verified, red for not verified
+                    wedges, texts, autotexts = ax.pie(verification_data.values, labels=verification_data.index, autopct='%1.1f%%', colors=colors)
+                    ax.set_title("GPS Verification Status", fontsize=16, fontweight='bold')
+                    
+                    for text in texts:
+                        text.set_fontsize(12)
+                    for autotext in autotexts:
+                        autotext.set_color('white')
+                        autotext.set_fontweight('bold')
+                        autotext.set_fontsize(11)
+                    
+                    st.pyplot(fig)
         
         else:
             st.markdown("""
             <div style="text-align: center; padding: 3rem;">
-                <h3>📱 No videos in database yet!</h3>
-                <p>This could mean:</p>
-                <ul style="text-align: left; max-width: 400px; margin: 0 auto;">
-                    <li>🆕 No videos have been uploaded yet</li>
-                    <li>🌐 Temporary database connectivity issue</li>
-                    <li>⏱️ Database service is starting up</li>
-                </ul>
-                <p><strong>Try:</strong></p>
-                <p>1. Upload a video first using "📤 Upload Videos"</p>
-                <p>2. Use the "🔧 Test Database Connection" button above</p>
-                <p>3. Refresh this page in a few moments</p>
+                <h3>📱 No videos yet!</h3>
+                <p>Upload some venue videos to see analytics here.</p>
             </div>
             """, unsafe_allow_html=True)
-            
-            # Show sample data for demo purposes
-            st.markdown("---")
-            st.markdown("### 📊 Demo Data (Sample Results)")
-            st.info("Since no database results are available, here's what the analytics would look like:")
-            
-            # Create sample demo data
-            demo_data = []
-            venues = ["The Rooftop Bar", "Club Voltage", "Midnight Lounge", "Beat Drop", "Vibe Central"]
-            types = ["Bar", "Club", "Lounge", "Club", "Bar"]
-            
-            for i, (venue, venue_type) in enumerate(zip(venues, types)):
-                demo_data.append({
-                    "Date": "2024-08-18",
-                    "Venue": venue,
-                    "Type": venue_type,
-                    "User": f"Demo{i+1}",
-                    "Lat": 40.7128 + np.random.uniform(-0.01, 0.01),
-                    "Lon": -74.0060 + np.random.uniform(-0.01, 0.01),
-                    "Verified": "✅" if i % 2 == 0 else "❌",
-                    "BPM": np.random.randint(90, 140),
-                    "Volume": np.random.randint(60, 95),
-                    "Crowd": np.random.choice(["Light", "Moderate", "Busy", "Packed"]),
-                    "Mood": np.random.choice(["Happy", "Excited", "Energetic", "Social"]),
-                    "Energy Score": round(np.random.uniform(45, 95), 1)
-                })
-            
-            demo_df = pd.DataFrame(demo_data)
-            
-            # Demo stats
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("📊 Demo Videos", len(demo_df))
-            with col2:
-                st.metric("⚡ Avg Energy", f"{demo_df['Energy Score'].mean():.1f}")
-            with col3:
-                st.metric("🏢 Demo Venues", demo_df["Venue"].nunique())
-            with col4:
-                st.metric("✅ Verified", len([x for x in demo_df["Verified"] if x == "✅"]))
-            
-            # Demo table
-            st.markdown("#### 📋 Demo Results Table")
-            st.dataframe(demo_df, use_container_width=True, hide_index=True)
-            
-            # Demo chart
-            st.markdown("#### 📊 Demo Analytics")
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.hist(demo_df["Energy Score"], bins=8, alpha=0.8, color='#667eea', edgecolor='white', linewidth=1)
-            ax.set_xlabel("Energy Score", fontsize=12)
-            ax.set_ylabel("Number of Venues", fontsize=12)
-            ax.set_title("Demo: Energy Score Distribution", fontsize=16, fontweight='bold')
-            ax.grid(True, alpha=0.3)
-            st.pyplot(fig)
         
         return
     
-    # Regular upload interface - Mobile optimized
+    # Upload Videos Section (existing code)
     # User identification section
     st.sidebar.markdown("### 👤 Your Info")
     
