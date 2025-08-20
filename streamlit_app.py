@@ -12,10 +12,12 @@ import requests
 import base64
 import uuid
 import streamlit.components.v1 as components
+from supabase import create_client, Client
 
 # Supabase configuration
 SUPABASE_URL = "https://tmmheslzkqiveylrnpal.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRtbWhlc2x6a3FpdmV5bHJucGFsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzMzI5MjAsImV4cCI6MjA2OTkwODkyMH0.U-10R707xIs6rH-Vd5lBgh2INylFu6zn_EyoJYx_zpI"
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Page config
 st.set_page_config(
@@ -183,8 +185,8 @@ st.markdown("""
 # Initialize session state
 if 'processed_videos' not in st.session_state:
     st.session_state.processed_videos = []
-if 'user_session_id' not in st.session_state:
-    st.session_state.user_session_id = str(uuid.uuid4())[:8]
+if 'user' not in st.session_state:
+    st.session_state.user = None
 if 'user_location' not in st.session_state:
     st.session_state.user_location = None
 
@@ -248,7 +250,6 @@ def get_location_component():
     # This is a dummy call; the actual communication is handled by postMessage
     components.html(js_code, height=0, width=0, key='user_location')
 
-
 def upload_video_to_supabase(uploaded_file, video_id):
     """Upload video file to Supabase Storage"""
     try:
@@ -293,12 +294,12 @@ def verify_venue_location(latitude, longitude, venue_name):
             return True
     return False
 
-def save_user_rating(venue_id, user_session, rating, venue_name, venue_type):
+def save_user_rating(venue_id, user_id, rating, venue_name, venue_type):
     """Save a user's rating of a venue"""
     try:
         rating_data = {
             "venue_id": str(venue_id),
-            "user_session": str(user_session)[:20],
+            "user_id": str(user_id)[:20],
             "rating": int(rating),
             "venue_name": str(venue_name)[:100],
             "venue_type": str(venue_type)[:50],
@@ -334,19 +335,22 @@ def save_to_supabase(results, uploaded_file=None):
         if uploaded_file:
             video_url, video_filename = upload_video_to_supabase(uploaded_file, video_id)
         
-        # Include user name if provided
-        user_name = st.session_state.get('user_name', '')
-        
         # Get GPS data from results
         gps_data = results.get("gps_data", {})
         
+        # Get current user ID
+        user_id = st.session_state.user.id if st.session_state.user else None
+        
+        if not user_id:
+            st.error("❌ Cannot save results. You must be logged in.")
+            return False, None
+
         # Prepare data with proper type casting and validation
         db_data = {
             "id": video_id, # Add explicit ID
+            "user_id": user_id, # New column for the user's ID
             "venue_name": str(results["venue_name"])[:100],  # Limit length
             "venue_type": str(results["venue_type"])[:50],
-            "user_session": str(st.session_state.user_session_id)[:20],
-            "user_name": str(user_name)[:50] if user_name else None,
             
             # Video storage fields
             "video_url": video_url,
@@ -420,29 +424,15 @@ def save_to_supabase(results, uploaded_file=None):
         st.error(traceback.format_exc())
         return False, None
 
-def load_all_results():
-    """Load all results from Supabase database with correct headers and error handling."""
+def load_user_results(user_id):
+    """Load videos uploaded by the logged-in user."""
+    if not user_id:
+        return []
+    
     try:
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        # Make the GET request to fetch all records
-        response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/video_results?select=*&order=created_at.desc",
-            headers=headers
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            st.write(f"🔍 Debug: Fetched {len(data)} videos from the database.")
-            return data
-        else:
-            st.error(f"❌ Failed to load data from Supabase. Status code: {response.status_code}")
-            st.error(f"Error details: {response.text}")
-            return []
+        data = supabase.from_("video_results").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
+        st.write(f"🔍 Debug: Fetched {len(data.data)} videos for user {user_id}.")
+        return data.data
     except Exception as e:
         st.error(f"❌ Database error during data load: {str(e)}")
         return []
@@ -617,169 +607,207 @@ def display_results(results):
         ax.set_xlabel("Confidence")
         ax.set_ylabel("")
         st.pyplot(fig)
-        
-    # GPS Location Data: This section has been removed to prevent it from showing on the UI.
-    # The data is still collected and saved to the database.
 
 def display_all_results_page():
     """Display a page with all results from the database, including stored videos."""
-    st.subheader("All Videos in Database")
-    st.info("Navigate to 'Upload & Analyze' in the sidebar to access the upload form.")
+    st.subheader("Your Uploaded Videos")
     
-    all_videos = load_all_results()
-    
-    if all_videos:
-        st.write(f"Showing {len(all_videos)} videos.")
-        
-        # Add a search bar
-        search_term = st.text_input("Search videos by venue name...", "")
-        
-        filtered_videos = [v for v in all_videos if search_term.lower() in v.get('venue_name', '').lower()]
-        
-        if not filtered_videos:
-            st.info("No videos match your search criteria.")
-        
-        # Display each video result
-        for video_data in filtered_videos:
-            # Add a check to ensure video data is complete before displaying
-            if 'id' in video_data and video_data['id']:
-                with st.expander(f"**{video_data['venue_name']}** ({video_data['venue_type']}) - {video_data['created_at'][:10]}"):
-                    
-                    # Display the actual stored video if a URL exists
-                    video_url = video_data.get('video_url')
-                    if video_url:
-                        st.video(video_url)
-                    else:
-                        st.info("No video file was stored for this entry.")
-                    
-                    # Display key metrics
-                    col_m1, col_m2 = st.columns(2)
-                    col_m1.metric("Overall Vibe", video_data.get('overall_vibe', 'N/A'))
-                    col_m2.metric("Energy Score", f"{video_data.get('energy_score', 0):.2f}/100")
-                    
-                    # Add a rating slider and a button to rate the video
-                    rating = st.slider(f"Rate this video (1-5):", 1, 5, 3, key=f"slider_{video_data['id']}")
-                    if st.button(f"Submit Rating for {video_data['venue_name']}", key=f"button_{video_data['id']}"):
-                        if save_user_rating(video_data['id'], st.session_state.user_session_id, rating, video_data['venue_name'], video_data['venue_type']):
-                            st.success("Your rating has been submitted!")
+    if st.session_state.user:
+        user_videos = load_user_results(st.session_state.user.id)
+        if user_videos:
+            st.write(f"Showing {len(user_videos)} videos uploaded by you.")
+            
+            # Add a search bar
+            search_term = st.text_input("Search your videos by venue name...", "")
+            
+            filtered_videos = [v for v in user_videos if search_term.lower() in v.get('venue_name', '').lower()]
+            
+            if not filtered_videos:
+                st.info("No videos match your search criteria.")
+            
+            # Display each video result
+            for video_data in filtered_videos:
+                # Add a check to ensure video data is complete before displaying
+                if 'id' in video_data and video_data['id']:
+                    with st.expander(f"**{video_data['venue_name']}** ({video_data['venue_type']}) - {video_data['created_at'][:10]}"):
+                        
+                        # Display the actual stored video if a URL exists
+                        video_url = video_data.get('video_url')
+                        if video_url:
+                            st.video(video_url)
                         else:
-                            st.error("There was an error submitting your rating.")
-                            
-                    # Display detailed data (optional)
-                    st.json(video_data)
-            else:
-                st.error("❌ A video record was found but is missing a unique ID. Skipping display.")
-                
+                            st.info("No video file was stored for this entry.")
+                        
+                        # Display key metrics
+                        col_m1, col_m2 = st.columns(2)
+                        col_m1.metric("Overall Vibe", video_data.get('overall_vibe', 'N/A'))
+                        col_m2.metric("Energy Score", f"{video_data.get('energy_score', 0):.2f}/100")
+                        
+                        # Add a rating slider and a button to rate the video
+                        rating = st.slider(f"Rate this video (1-5):", 1, 5, 3, key=f"slider_{video_data['id']}")
+                        if st.button(f"Submit Rating for {video_data['venue_name']}", key=f"button_{video_data['id']}"):
+                            if save_user_rating(video_data['id'], st.session_state.user.id, rating, video_data['venue_name'], video_data['venue_type']):
+                                st.success("Your rating has been submitted!")
+                            else:
+                                st.error("There was an error submitting your rating.")
+                                
+                        # Display detailed data (optional)
+                        st.json(video_data)
+                else:
+                    st.error("❌ A video record was found but is missing a unique ID. Skipping display.")
+                    
+        else:
+            st.info("You have not uploaded any videos yet. Upload one from the 'Upload & Analyze' page!")
     else:
-        st.info("There are no videos in the database. Please upload one first!")
+        st.warning("Please log in to view your uploaded videos.")
+
+def handle_login(email, password):
+    try:
+        user = supabase.auth.sign_in_with_password({"email": email, "password": password}).user
+        st.session_state.user = user
+        st.success("Logged in successfully!")
+    except Exception as e:
+        st.error(f"Login failed: {e}")
+
+def handle_signup(email, password):
+    try:
+        user = supabase.auth.sign_up({"email": email, "password": password}).user
+        st.session_state.user = user
+        st.success("Signed up and logged in successfully! Check your email to confirm.")
+    except Exception as e:
+        st.error(f"Sign up failed: {e}")
+
+def handle_logout():
+    supabase.auth.sign_out()
+    st.session_state.user = None
+    st.success("Logged out successfully!")
 
 def main():
     st.markdown('<div class="main-header"><h1>SneakPeak Video Scorer</h1><p>A tool for real-time venue intelligence</p></div>', unsafe_allow_html=True)
 
     # Use a radio button to switch between pages
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Upload & Analyze", "View All Results"])
+    page = st.sidebar.radio("Go to", ["Upload & Analyze", "View My Videos"])
     
-    st.sidebar.header("User Info")
-    user_name = st.sidebar.text_input("Enter your name", value=st.session_state.get('user_name', ''))
-    if user_name:
-        st.session_state.user_name = user_name
-    st.sidebar.text(f"Session ID: {st.session_state.user_session_id}")
-    
+    st.sidebar.header("User Account")
+    if st.session_state.user:
+        st.sidebar.success(f"Logged in as {st.session_state.user.email}")
+        if st.sidebar.button("Log Out"):
+            handle_logout()
+            st.rerun()
+    else:
+        with st.sidebar.form("auth_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            
+            login_button = st.form_submit_button("Log In")
+            signup_button = st.form_submit_button("Sign Up")
+            
+            if login_button:
+                handle_login(email, password)
+                st.rerun()
+            if signup_button:
+                handle_signup(email, password)
+                st.rerun()
+        st.sidebar.text("You are currently not logged in.")
+
     if page == "Upload & Analyze":
         st.header("Upload a Video")
-        st.info("Fill out the details below and upload a video to start the analysis.")
-        
-        # Form for venue details and analysis
-        with st.form("analysis_form"):
-            st.subheader("Enter Venue Details")
-            venue_name = st.text_input("Venue Name", "Demo Nightclub", key="venue_name_input")
-            venue_type = st.selectbox("Venue Type", ["Club", "Bar", "Lounge", "Concert Hall"], key="venue_type_input")
+        if not st.session_state.user:
+            st.warning("Please log in to upload and analyze a video.")
+        else:
+            st.info(f"You are logged in as {st.session_state.user.email}.")
             
-            # Button to get GPS data
-            st.subheader("GPS Location")
-            if st.form_submit_button("Get Current Location"):
-                # Call the JS component to get location
-                get_location_component()
-                # Rerun the app to check for updated session state
-                st.rerun()
+            # Form for venue details and analysis
+            with st.form("analysis_form"):
+                st.subheader("Enter Venue Details")
+                venue_name = st.text_input("Venue Name", "Demo Nightclub", key="venue_name_input")
+                venue_type = st.selectbox("Venue Type", ["Club", "Bar", "Lounge", "Concert Hall"], key="venue_type_input")
+                
+                # Button to get GPS data
+                st.subheader("GPS Location")
+                if st.form_submit_button("Get Current Location"):
+                    # Call the JS component to get location
+                    get_location_component()
+                    # Rerun the app to check for updated session state
+                    st.rerun()
 
-            # Display the fetched location or a message
-            if st.session_state.user_location:
-                if st.session_state.user_location.get('error'):
-                    st.error(f"Error getting location: {st.session_state.user_location['error']}")
-                    latitude, longitude, accuracy = None, None, None
-                else:
-                    latitude = st.session_state.user_location['latitude']
-                    longitude = st.session_state.user_location['longitude']
-                    accuracy = st.session_state.user_location['accuracy']
-                    st.success("✅ Location fetched successfully! The data will be saved with the video.")
-            else:
-                st.info("Click 'Get Current Location' to fetch GPS coordinates.")
-                latitude, longitude, accuracy = None, None, None
-
-            # File uploader and analysis button inside the form
-            uploaded_file = st.file_uploader("Choose a video file...", type=['mp4', 'mov', 'avi'])
-            submitted = st.form_submit_button("Start Analysis")
-            
-            if submitted:
-                if uploaded_file:
-                    if latitude is None or longitude is None:
-                        st.error("Please get your GPS location before starting the analysis.")
+                # Display the fetched location or a message
+                if st.session_state.user_location:
+                    if st.session_state.user_location.get('error'):
+                        st.error(f"Error getting location: {st.session_state.user_location['error']}")
+                        latitude, longitude, accuracy = None, None, None
                     else:
-                        with st.spinner("Analyzing video..."):
-                            # Simulate video processing
-                            tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-                            tfile.write(uploaded_file.getvalue())
-                            temp_path = tfile.name
-                            tfile.close()
-
-                            # Simulate analysis functions
-                            audio_features = extract_audio_features(temp_path)
-                            visual_features = analyze_visual_features(temp_path)
-                            crowd_features = analyze_crowd_features(temp_path)
-                            mood_features = analyze_mood_recognition(temp_path)
-                            
-                            # Verify location
-                            is_verified = verify_venue_location(latitude, longitude, venue_name)
-
-                            # Construct results dictionary
-                            results = {
-                                "venue_name": venue_name,
-                                "venue_type": venue_type,
-                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                "gps_data": {
-                                    "latitude": latitude,
-                                    "longitude": longitude,
-                                    "accuracy": accuracy,
-                                    "venue_verified": is_verified
-                                },
-                                "audio_environment": audio_features,
-                                "visual_environment": visual_features,
-                                "crowd_density": crowd_features,
-                                "mood_recognition": mood_features
-                            }
-                            
-                            # Calculate energy score
-                            results["energy_score"] = calculate_energy_score(results)
-                            
-                            # Save results and video
-                            success, video_id = save_to_supabase(results, uploaded_file)
-                            if success:
-                                st.success(f"Video saved with ID: {video_id}")
-                                # To display the saved video immediately, you can fetch it
-                                # and add it to the processed videos list
-                                saved_video_data = load_video_by_id(video_id)
-                                if saved_video_data:
-                                    st.session_state.processed_videos.append(saved_video_data)
-                                    display_results(saved_video_data)
-                                
-                            # Clean up temp file
-                            os.unlink(temp_path)
+                        latitude = st.session_state.user_location['latitude']
+                        longitude = st.session_state.user_location['longitude']
+                        accuracy = st.session_state.user_location['accuracy']
+                        st.success("✅ Location fetched successfully! The data will be saved with the video.")
                 else:
-                    st.error("Please upload a video file to proceed with the analysis.")
+                    st.info("Click 'Get Current Location' to fetch GPS coordinates.")
+                    latitude, longitude, accuracy = None, None, None
+
+                # File uploader and analysis button inside the form
+                uploaded_file = st.file_uploader("Choose a video file...", type=['mp4', 'mov', 'avi'])
+                submitted = st.form_submit_button("Start Analysis")
+                
+                if submitted:
+                    if uploaded_file:
+                        if latitude is None or longitude is None:
+                            st.error("Please get your GPS location before starting the analysis.")
+                        elif not st.session_state.user:
+                            st.error("Please log in to upload a video.")
+                        else:
+                            with st.spinner("Analyzing video..."):
+                                # Simulate video processing
+                                tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+                                tfile.write(uploaded_file.getvalue())
+                                temp_path = tfile.name
+                                tfile.close()
+
+                                # Simulate analysis functions
+                                audio_features = extract_audio_features(temp_path)
+                                visual_features = analyze_visual_features(temp_path)
+                                crowd_features = analyze_crowd_features(temp_path)
+                                mood_features = analyze_mood_recognition(temp_path)
+                                
+                                # Verify location
+                                is_verified = verify_venue_location(latitude, longitude, venue_name)
+
+                                # Construct results dictionary
+                                results = {
+                                    "venue_name": venue_name,
+                                    "venue_type": venue_type,
+                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "gps_data": {
+                                        "latitude": latitude,
+                                        "longitude": longitude,
+                                        "accuracy": accuracy,
+                                        "venue_verified": is_verified
+                                    },
+                                    "audio_environment": audio_features,
+                                    "visual_environment": visual_features,
+                                    "crowd_density": crowd_features,
+                                    "mood_recognition": mood_features
+                                }
+                                
+                                # Calculate energy score
+                                results["energy_score"] = calculate_energy_score(results)
+                                
+                                # Save results and video
+                                success, video_id = save_to_supabase(results, uploaded_file)
+                                if success:
+                                    st.success(f"Video saved with ID: {video_id}")
+                                    saved_video_data = load_video_by_id(video_id)
+                                    if saved_video_data:
+                                        st.session_state.processed_videos.append(saved_video_data)
+                                        display_results(saved_video_data)
+                                    
+                                # Clean up temp file
+                                os.unlink(temp_path)
+                    else:
+                        st.error("Please upload a video file to proceed with the analysis.")
     
-    elif page == "View All Results":
+    elif page == "View My Videos":
         display_all_results_page()
 
 if __name__ == "__main__":
