@@ -22,7 +22,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Page config
 st.set_page_config(
     page_title="SneakPeak Video Scorer",
-    page_icon="🎯",
+    page_icon="�",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -163,7 +163,7 @@ st.markdown("""
     .stAlert {
         border-radius: 12px;
         border: none;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        box-shadow: 2px 8px rgba(0,0,0,0.1);
     }
     
     /* Hide hamburger menu on mobile for cleaner look */
@@ -722,7 +722,7 @@ def main():
             with st.form("analysis_form"):
                 st.subheader("Enter Venue Details")
                 venue_name = st.text_input("Venue Name", "Demo Nightclub", key="venue_name_input")
-                venue_type = st.selectbox("Venue Type", ["Club", "Bar", "Lounge", "Concert Hall"], key="venue_type_input")
+                venue_type = st.selectbox("Venue Type", ["Club", "Bar", "Restaurant", "Lounge", "Rooftop", "Outdoors Space", "Concert Hall", "Event Space", "Dive Bar", "Speakeasy", "Sports Bar", "Brewery", "Other"], key="venue_type_input")
                 
                 # Button to get GPS data
                 st.subheader("GPS Location")
@@ -812,3 +812,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+�
