@@ -618,14 +618,8 @@ def display_results(results):
         ax.set_ylabel("")
         st.pyplot(fig)
         
-    # Display GPS data
-    if results.get("gps_data"):
-        with st.expander("📍 GPS Location Data"):
-            st.markdown(f"**Latitude:** {results['gps_data']['latitude']:.4f}")
-            st.markdown(f"**Longitude:** {results['gps_data']['longitude']:.4f}")
-            st.markdown(f"**Accuracy:** {results['gps_data']['accuracy']:.2f} meters")
-            status = "✅ Verified" if results['gps_data']['venue_verified'] else "❌ Unverified"
-            st.markdown(f"**Venue Verification:** {status}")
+    # GPS Location Data: This section has been removed to prevent it from showing on the UI.
+    # The data is still collected and saved to the database.
 
 def display_all_results_page():
     """Display a page with all results from the database, including stored videos."""
@@ -719,9 +713,7 @@ def main():
                     latitude = st.session_state.user_location['latitude']
                     longitude = st.session_state.user_location['longitude']
                     accuracy = st.session_state.user_location['accuracy']
-                    st.success("✅ Location fetched successfully!")
-                    st.write(f"Latitude: {latitude:.4f}")
-                    st.write(f"Longitude: {longitude:.4f}")
+                    st.success("✅ Location fetched successfully! The data will be saved with the video.")
             else:
                 st.info("Click 'Get Current Location' to fetch GPS coordinates.")
                 latitude, longitude, accuracy = None, None, None
