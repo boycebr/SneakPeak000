@@ -185,6 +185,41 @@ if 'processed_videos' not in st.session_state:
 if 'user_session_id' not in st.session_state:
     st.session_state.user_session_id = str(uuid.uuid4())[:8]
 
+def upload_video_to_supabase(uploaded_file, video_id):
+    """Upload video file to Supabase Storage"""
+    try:
+        # Create unique filename
+        file_extension = uploaded_file.name.split('.')[-1]
+        filename = f"{video_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
+        
+        # Upload to Supabase Storage
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "video/mp4" # Or match uploaded_file.type
+        }
+        
+        # Use a more direct upload method by sending the file content in the body
+        response = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/videos/{filename}",
+            headers=headers,
+            data=uploaded_file.getvalue()
+        )
+        
+        if response.status_code == 200:
+            # Return the public URL
+            video_url = f"{SUPABASE_URL}/storage/v1/object/public/videos/{filename}"
+            return video_url, filename
+        else:
+            st.error(f"Video upload failed: {response.status_code}")
+            if response.text:
+                st.error(f"Error details: {response.text}")
+            return None, None
+            
+    except Exception as e:
+        st.error(f"Error uploading video: {str(e)}")
+        return None, None
+
 def verify_venue_location(latitude, longitude, venue_name):
     """Simple venue verification - in production this would check against venue database"""
     # For demo purposes, just return True if coordinates are reasonable
@@ -223,9 +258,18 @@ def save_user_rating(venue_id, user_session, rating, venue_name, venue_type):
         st.error(f"Error saving rating: {str(e)}")
         return False
 
-def save_to_supabase(results):
-    """Save analysis results to Supabase database with GPS data and detailed debugging"""
+def save_to_supabase(results, uploaded_file=None):
+    """Save analysis results to Supabase database, and upload video if provided."""
     try:
+        # Generate unique ID for this entry
+        video_id = str(uuid.uuid4())
+        
+        # Upload video if provided
+        video_url = None
+        video_filename = None
+        if uploaded_file:
+            video_url, video_filename = upload_video_to_supabase(uploaded_file, video_id)
+        
         # Include user name if provided
         user_name = st.session_state.get('user_name', '')
         
@@ -234,11 +278,17 @@ def save_to_supabase(results):
         
         # Prepare data with proper type casting and validation
         db_data = {
+            "id": video_id, # Add explicit ID
             "venue_name": str(results["venue_name"])[:100],  # Limit length
             "venue_type": str(results["venue_type"])[:50],
             "user_session": str(st.session_state.user_session_id)[:20],
             "user_name": str(user_name)[:50] if user_name else None,
             
+            # Video storage fields
+            "video_url": video_url,
+            "video_filename": video_filename,
+            "video_stored": video_url is not None,
+
             # GPS COLUMNS
             "latitude": float(gps_data.get("latitude")) if gps_data.get("latitude") else None,
             "longitude": float(gps_data.get("longitude")) if gps_data.get("longitude") else None,
@@ -286,7 +336,7 @@ def save_to_supabase(results):
         
         if response.status_code == 201:
             st.success("✅ Results saved to database!")
-            return True
+            return True, video_id
         else:
             # Show full error details
             st.error(f"❌ Database save failed: {response.status_code}")
@@ -299,12 +349,12 @@ def save_to_supabase(results):
                 st.json(error_json)
             except:
                 st.write("Raw response:", response.text)
-            return False
+            return False, None
     except Exception as e:
         st.error(f"❌ Database error: {str(e)}")
         import traceback
         st.error(traceback.format_exc())
-        return False
+        return False, None
 
 def load_all_results():
     """Load all results from Supabase database with correct headers and error handling."""
@@ -514,7 +564,7 @@ def display_results(results):
             st.markdown(f"**Venue Verification:** {status}")
 
 def display_all_results_page():
-    """Display a page with all results from the database."""
+    """Display a page with all results from the database, including stored videos."""
     st.subheader("All Videos in Database")
     
     all_videos = load_all_results()
@@ -536,8 +586,12 @@ def display_all_results_page():
             if 'id' in video_data and video_data['id']:
                 with st.expander(f"**{video_data['venue_name']}** ({video_data['venue_type']}) - {video_data['created_at'][:10]}"):
                     
-                    # Use a unique key for the video player
-                    st.video("https://www.youtube.com/watch?v=dQw4w9WgXcQ", start_time=10)
+                    # Display the actual stored video if a URL exists
+                    video_url = video_data.get('video_url')
+                    if video_url:
+                        st.video(video_url)
+                    else:
+                        st.info("No video file was stored for this entry.")
                     
                     # Display key metrics
                     col_m1, col_m2 = st.columns(2)
@@ -634,15 +688,20 @@ def main():
                         
                         # Calculate energy score
                         results["energy_score"] = calculate_energy_score(results)
-
-                        # Save results
-                        if save_to_supabase(results):
-                            st.session_state.processed_videos.append(results)
                         
-                        # Display results
-                        display_results(results)
-                        
-                    os.unlink(temp_path)
+                        # Save results and video
+                        success, video_id = save_to_supabase(results, uploaded_file)
+                        if success:
+                            st.success(f"Video saved with ID: {video_id}")
+                            # To display the saved video immediately, you can fetch it
+                            # and add it to the processed videos list
+                            saved_video_data = load_video_by_id(video_id)
+                            if saved_video_data:
+                                st.session_state.processed_videos.append(saved_video_data)
+                                display_results(saved_video_data)
+                            
+                        # Clean up temp file
+                        os.unlink(temp_path)
     
     elif page == "View All Results":
         display_all_results_page()
