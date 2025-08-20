@@ -11,6 +11,7 @@ from moviepy.editor import VideoFileClip
 import requests
 import base64
 import uuid
+import streamlit.components.v1 as components
 
 # Supabase configuration
 SUPABASE_URL = "https://tmmheslzkqiveylrnpal.supabase.co"
@@ -184,6 +185,69 @@ if 'processed_videos' not in st.session_state:
     st.session_state.processed_videos = []
 if 'user_session_id' not in st.session_state:
     st.session_state.user_session_id = str(uuid.uuid4())[:8]
+if 'user_location' not in st.session_state:
+    st.session_state.user_location = None
+
+def get_location_component():
+    """
+    A Streamlit component that uses JavaScript to get the user's location
+    and returns it to the Streamlit app.
+    """
+    # JavaScript to get geolocation
+    js_code = """
+    <script>
+    function getLocation() {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            const data = {
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+              accuracy: position.coords.accuracy,
+              error: null
+            };
+            window.parent.postMessage({
+              type: 'streamlit:setComponentValue',
+              componentId: 'user_location',
+              value: data
+            }, '*');
+          },
+          (error) => {
+            const data = {
+              latitude: null,
+              longitude: null,
+              accuracy: null,
+              error: error.message
+            };
+            window.parent.postMessage({
+              type: 'streamlit:setComponentValue',
+              componentId: 'user_location',
+              value: data
+            }, '*');
+          }
+        );
+      } else { 
+        const data = {
+          latitude: null,
+          longitude: null,
+          accuracy: null,
+          error: "Geolocation is not supported by this browser."
+        };
+        window.parent.postMessage({
+          type: 'streamlit:setComponentValue',
+          componentId: 'user_location',
+          value: data
+        }, '*');
+      }
+    }
+    
+    // Call the function when the component loads
+    getLocation();
+    </script>
+    """
+    # This is a dummy call; the actual communication is handled by postMessage
+    components.html(js_code, height=0, width=0, key='user_location')
+
 
 def upload_video_to_supabase(uploaded_file, video_id):
     """Upload video file to Supabase Storage"""
@@ -632,75 +696,94 @@ def main():
         st.header("Upload a Video")
         st.info("Fill out the details below and upload a video to start the analysis.")
         
-        # Form for venue details and analysis is now outside the file uploader check
+        # Form for venue details and analysis
         with st.form("analysis_form"):
             st.subheader("Enter Venue Details")
             venue_name = st.text_input("Venue Name", "Demo Nightclub", key="venue_name_input")
             venue_type = st.selectbox("Venue Type", ["Club", "Bar", "Lounge", "Concert Hall"], key="venue_type_input")
             
-            # GPS data input (simulated)
+            # Button to get GPS data
             st.subheader("GPS Location")
-            col_lat, col_lon = st.columns(2)
-            with col_lat:
-                latitude = st.number_input("Latitude", value=40.7128, format="%.4f")
-            with col_lon:
-                longitude = st.number_input("Longitude", value=-74.0060, format="%.4f")
-            
+            if st.form_submit_button("Get Current Location"):
+                # Call the JS component to get location
+                get_location_component()
+                # Rerun the app to check for updated session state
+                st.rerun()
+
+            # Display the fetched location or a message
+            if st.session_state.user_location:
+                if st.session_state.user_location.get('error'):
+                    st.error(f"Error getting location: {st.session_state.user_location['error']}")
+                    latitude, longitude, accuracy = None, None, None
+                else:
+                    latitude = st.session_state.user_location['latitude']
+                    longitude = st.session_state.user_location['longitude']
+                    accuracy = st.session_state.user_location['accuracy']
+                    st.success("✅ Location fetched successfully!")
+                    st.write(f"Latitude: {latitude:.4f}")
+                    st.write(f"Longitude: {longitude:.4f}")
+            else:
+                st.info("Click 'Get Current Location' to fetch GPS coordinates.")
+                latitude, longitude, accuracy = None, None, None
+
             # File uploader and analysis button inside the form
             uploaded_file = st.file_uploader("Choose a video file...", type=['mp4', 'mov', 'avi'])
             submitted = st.form_submit_button("Start Analysis")
             
             if submitted:
                 if uploaded_file:
-                    with st.spinner("Analyzing video..."):
-                        # Simulate video processing
-                        tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-                        tfile.write(uploaded_file.getvalue())
-                        temp_path = tfile.name
-                        tfile.close()
+                    if latitude is None or longitude is None:
+                        st.error("Please get your GPS location before starting the analysis.")
+                    else:
+                        with st.spinner("Analyzing video..."):
+                            # Simulate video processing
+                            tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+                            tfile.write(uploaded_file.getvalue())
+                            temp_path = tfile.name
+                            tfile.close()
 
-                        # Simulate analysis functions
-                        audio_features = extract_audio_features(temp_path)
-                        visual_features = analyze_visual_features(temp_path)
-                        crowd_features = analyze_crowd_features(temp_path)
-                        mood_features = analyze_mood_recognition(temp_path)
-                        
-                        # Verify location
-                        is_verified = verify_venue_location(latitude, longitude, venue_name)
-
-                        # Construct results dictionary
-                        results = {
-                            "venue_name": venue_name,
-                            "venue_type": venue_type,
-                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "gps_data": {
-                                "latitude": latitude,
-                                "longitude": longitude,
-                                "accuracy": np.random.uniform(5, 50),
-                                "venue_verified": is_verified
-                            },
-                            "audio_environment": audio_features,
-                            "visual_environment": visual_features,
-                            "crowd_density": crowd_features,
-                            "mood_recognition": mood_features
-                        }
-                        
-                        # Calculate energy score
-                        results["energy_score"] = calculate_energy_score(results)
-                        
-                        # Save results and video
-                        success, video_id = save_to_supabase(results, uploaded_file)
-                        if success:
-                            st.success(f"Video saved with ID: {video_id}")
-                            # To display the saved video immediately, you can fetch it
-                            # and add it to the processed videos list
-                            saved_video_data = load_video_by_id(video_id)
-                            if saved_video_data:
-                                st.session_state.processed_videos.append(saved_video_data)
-                                display_results(saved_video_data)
+                            # Simulate analysis functions
+                            audio_features = extract_audio_features(temp_path)
+                            visual_features = analyze_visual_features(temp_path)
+                            crowd_features = analyze_crowd_features(temp_path)
+                            mood_features = analyze_mood_recognition(temp_path)
                             
-                        # Clean up temp file
-                        os.unlink(temp_path)
+                            # Verify location
+                            is_verified = verify_venue_location(latitude, longitude, venue_name)
+
+                            # Construct results dictionary
+                            results = {
+                                "venue_name": venue_name,
+                                "venue_type": venue_type,
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "gps_data": {
+                                    "latitude": latitude,
+                                    "longitude": longitude,
+                                    "accuracy": accuracy,
+                                    "venue_verified": is_verified
+                                },
+                                "audio_environment": audio_features,
+                                "visual_environment": visual_features,
+                                "crowd_density": crowd_features,
+                                "mood_recognition": mood_features
+                            }
+                            
+                            # Calculate energy score
+                            results["energy_score"] = calculate_energy_score(results)
+                            
+                            # Save results and video
+                            success, video_id = save_to_supabase(results, uploaded_file)
+                            if success:
+                                st.success(f"Video saved with ID: {video_id}")
+                                # To display the saved video immediately, you can fetch it
+                                # and add it to the processed videos list
+                                saved_video_data = load_video_by_id(video_id)
+                                if saved_video_data:
+                                    st.session_state.processed_videos.append(saved_video_data)
+                                    display_results(saved_video_data)
+                                
+                            # Clean up temp file
+                            os.unlink(temp_path)
                 else:
                     st.error("Please upload a video file to proceed with the analysis.")
     
