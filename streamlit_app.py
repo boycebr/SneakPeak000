@@ -566,6 +566,7 @@ def display_results(results):
 def display_all_results_page():
     """Display a page with all results from the database, including stored videos."""
     st.subheader("All Videos in Database")
+    st.info("Navigate to 'Upload & Analyze' in the sidebar to access the upload form.")
     
     all_videos = load_all_results()
     
@@ -629,6 +630,7 @@ def main():
     
     if page == "Upload & Analyze":
         st.header("Upload a Video")
+        st.info("Fill out the details below and upload a video to start the analysis.")
         
         # Form for venue details and analysis is now outside the file uploader check
         with st.form("analysis_form"):
