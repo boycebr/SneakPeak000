@@ -630,29 +630,26 @@ def main():
     if page == "Upload & Analyze":
         st.header("Upload a Video")
         
-        uploaded_file = st.file_uploader("Choose a video file...", type=['mp4', 'mov', 'avi'])
-        
-        if uploaded_file:
-            st.success("File uploaded successfully!")
+        # Form for venue details and analysis is now outside the file uploader check
+        with st.form("analysis_form"):
+            st.subheader("Enter Venue Details")
+            venue_name = st.text_input("Venue Name", "Demo Nightclub", key="venue_name_input")
+            venue_type = st.selectbox("Venue Type", ["Club", "Bar", "Lounge", "Concert Hall"], key="venue_type_input")
             
-            # Form for venue details and analysis
-            with st.form("analysis_form"):
-                st.subheader("Enter Venue Details")
-                venue_name = st.text_input("Venue Name", "Demo Nightclub", key="venue_name_input")
-                venue_type = st.selectbox("Venue Type", ["Club", "Bar", "Lounge", "Concert Hall"], key="venue_type_input")
-                
-                # GPS data input (simulated)
-                st.subheader("GPS Location")
-                col_lat, col_lon = st.columns(2)
-                with col_lat:
-                    latitude = st.number_input("Latitude", value=40.7128, format="%.4f")
-                with col_lon:
-                    longitude = st.number_input("Longitude", value=-74.0060, format="%.4f")
-                
-                # Button to start analysis
-                submitted = st.form_submit_button("Start Analysis")
-                
-                if submitted:
+            # GPS data input (simulated)
+            st.subheader("GPS Location")
+            col_lat, col_lon = st.columns(2)
+            with col_lat:
+                latitude = st.number_input("Latitude", value=40.7128, format="%.4f")
+            with col_lon:
+                longitude = st.number_input("Longitude", value=-74.0060, format="%.4f")
+            
+            # File uploader and analysis button inside the form
+            uploaded_file = st.file_uploader("Choose a video file...", type=['mp4', 'mov', 'avi'])
+            submitted = st.form_submit_button("Start Analysis")
+            
+            if submitted:
+                if uploaded_file:
                     with st.spinner("Analyzing video..."):
                         # Simulate video processing
                         tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
@@ -702,6 +699,8 @@ def main():
                             
                         # Clean up temp file
                         os.unlink(temp_path)
+                else:
+                    st.error("Please upload a video file to proceed with the analysis.")
     
     elif page == "View All Results":
         display_all_results_page()
