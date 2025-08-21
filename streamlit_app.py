@@ -24,11 +24,25 @@ try:
 except Exception:
     HAS_SEABORN = False
 
+# MoviePy (we’ll also verify ffmpeg below)
 try:
     from moviepy.editor import VideoFileClip
     HAS_MOVIEPY = True
 except Exception:
     VideoFileClip = None
+    HAS_MOVIEPY = False
+
+# Try to detect a bundled ffmpeg from imageio-ffmpeg
+HAS_FFMPEG = False
+try:
+    import imageio_ffmpeg
+    FFMPEG_BINARY = imageio_ffmpeg.get_ffmpeg_exe()  # downloads/locates ffmpeg if needed
+    HAS_FFMPEG = bool(FFMPEG_BINARY)
+except Exception:
+    FFMPEG_BINARY = None
+
+# If ffmpeg is missing, we can't do full audio analysis via MoviePy
+if HAS_MOVIEPY and not HAS_FFMPEG:
     HAS_MOVIEPY = False
 
 from supabase import create_client, Client
@@ -48,44 +62,44 @@ st.set_page_config(
 )
 
 # ============================================
-# CONFIG & INIT with explicit checks
+# CONFIG & INIT
+# - Read from Secrets first; if absent, fall back to embedded defaults (your keys).
+# - Show clear warnings so issues are visible during testing.
 # ============================================
 
-def _missing(name: str) -> bool:
-    val = st.secrets.get(name)
-    return (val is None) or (isinstance(val, str) and (not val.strip() or "REPLACE_ME_IN_SECRETS" in val))
+# ---- Embedded defaults (as requested) ----
+_EMBEDDED_SUPABASE_URL  = "https://tmmheslzkqiveylrnpal.supabase.co"
+_EMBEDDED_SUPABASE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRtbWhlc2x6a3FpdmV5bHJucGFsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzMzI5MjAsImV4cCI6MjA2OTkwODkyMH0.U-10R707xIs6rH-Vd5lBgh2INylFu6zn_EyoJYx_zpI"
+_EMBEDDED_VISION_KEY    = "AIzaSyCcwH6w-3AglhEUmegXlWOtABZzJ1MrSiQ"
+_EMBEDDED_ACR_ACCESS    = "b1f7b901a4f15b99aba0efac395f6848"
+_EMBEDDED_ACR_SECRET    = "tIVqMBQwOYGkCjkXAyY2wPiM5wxS5UrNwqMwMQjA"
+_EMBEDDED_ACR_HOST      = "identify-eu-west-1.acrcloud.com"
+_EMBEDDED_ACR_ENDPOINT  = "/v1/identify"
 
-# --- Required: Supabase credentials ---
-if _missing("SUPABASE_URL") or _missing("SUPABASE_KEY"):
-    st.error(
-        "Supabase credentials are not configured.\n\n"
-        "Add `SUPABASE_URL` and `SUPABASE_KEY` to your app **Secrets**.\n\n"
-        "On Streamlit Cloud: **Manage app → Settings → Secrets**\n"
-        "Locally: create `.streamlit/secrets.toml`."
-    )
-    st.stop()
+# ---- Load actual config (Secrets override embedded) ----
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", _EMBEDDED_SUPABASE_URL)
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", _EMBEDDED_SUPABASE_KEY)
 
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+GOOGLE_VISION_API_KEY = st.secrets.get("GOOGLE_VISION_API_KEY", _EMBEDDED_VISION_KEY)
+ACRCLOUD_ACCESS_KEY   = st.secrets.get("ACRCLOUD_ACCESS_KEY", _EMBEDDED_ACR_ACCESS)
+ACRCLOUD_SECRET_KEY   = st.secrets.get("ACRCLOUD_SECRET_KEY", _EMBEDDED_ACR_SECRET)
+ACRCLOUD_API_HOST     = st.secrets.get("ACRCLOUD_API_HOST", _EMBEDDED_ACR_HOST)
+ACRCLOUD_API_ENDPOINT = st.secrets.get("ACRCLOUD_API_ENDPOINT", _EMBEDDED_ACR_ENDPOINT)
 
-# Create client (this will fail fast if the key is invalid)
+# ---- Initialize Supabase early (and fail loudly if broken) ----
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
     st.error(f"Failed to initialize Supabase client. Check SUPABASE_URL/KEY.\n\nDetails: {e}")
     st.stop()
 
-# --- Optional: External APIs (warn if absent) ---
-GOOGLE_VISION_API_KEY = st.secrets.get("GOOGLE_VISION_API_KEY", "")
+# ---- Health warnings (do NOT hide: you asked to see them) ----
 if not GOOGLE_VISION_API_KEY:
-    st.warning("Google Vision API key is not set. Visual analysis will fail. Add `GOOGLE_VISION_API_KEY` to Secrets.")
-
-ACRCLOUD_ACCESS_KEY = st.secrets.get("ACRCLOUD_ACCESS_KEY", "")
-ACRCLOUD_SECRET_KEY = st.secrets.get("ACRCLOUD_SECRET_KEY", "")
-ACRCLOUD_API_HOST = st.secrets.get("ACRCLOUD_API_HOST", "identify-eu-west-1.acrcloud.com")
-ACRCLOUD_API_ENDPOINT = st.secrets.get("ACRCLOUD_API_ENDPOINT", "/v1/identify")
+    st.warning("Google Vision API key is not set. Visual analysis will fail. Add GOOGLE_VISION_API_KEY to Secrets or keep the embedded fallback.")
 if not (ACRCLOUD_ACCESS_KEY and ACRCLOUD_SECRET_KEY):
-    st.warning("ACRCloud keys are not set. Genre detection will fall back to 'Unknown'. Add `ACRCLOUD_ACCESS_KEY` and `ACRCLOUD_SECRET_KEY` to Secrets.")
+    st.warning("ACRCloud keys are not set. Genre detection will fall back to 'Unknown'. Add ACRCLOUD_ACCESS_KEY and ACRCLOUD_SECRET_KEY to Secrets.")
+if not HAS_MOVIEPY:
+    st.warning("MoviePy/ffmpeg not detected. Audio analysis will be limited.")
 
 # ============================================
 # STYLE
@@ -544,7 +558,6 @@ def display_all_results_page():
                         c2.metric("Energy Score", f"{float(v.get('energy_score', 0)):.2f}/100")
                         rating = st.slider("Rate this video (1-5):", 1, 5, 3, key=f"slider_{v['id']}")
                         if st.button(f"Submit Rating for {v.get('venue_name','this venue')}", key=f"btn_{v['id']}"):
-                            # You can implement save_user_rating again later if needed
                             st.success("Thank you for your rating!")
                         st.json(v)
                 else:
@@ -619,7 +632,7 @@ def main():
                 key="venue_type_input"
             )
 
-            # GPS skipped for now; placeholders kept for DB schema compatibility
+            # GPS intentionally skipped for now (schema fields kept as None)
             latitude = longitude = accuracy = None
 
             uploaded_file = st.file_uploader("Choose a video file (max 200MB)...", type=["mp4", "mov", "avi"])
