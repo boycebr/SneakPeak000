@@ -1,9 +1,8 @@
-# SneakPeak Video Scorer - Complete Fixed Version
-# Move st.set_page_config to VERY FIRST - before any other streamlit commands
+# SneakPeak Video Scorer - Complete Fixed Version with Enhanced Upload
+# CRITICAL: Page config MUST be first Streamlit command
 
 import streamlit as st
 
-# CRITICAL: Page config MUST be first Streamlit command
 st.set_page_config(
     page_title="SneakPeak - Venue Pulse",
     page_icon="🎯",
@@ -27,10 +26,10 @@ from moviepy.editor import VideoFileClip
 import cv2
 
 # ================================
-# FIXED CONFIGURATION
+# CONFIGURATION
 # ================================
 
-# FIXED: Use service_role key from changelog instead of anon key
+# Use service_role key from changelog
 SUPABASE_URL = "https://tmmheslzkqiveylrnpal.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRtbWhlc2x6a3FpdmV5bHJucGFsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NDMzMjkyMCwiZXhwIjoyMDY5OTA4OTIwfQ.CAVz5AvQ0pR9nALRNMFAlCYIAxQFhWkRNx1n-m73A08"
 
@@ -127,7 +126,39 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================================
-# FIXED UTILITY FUNCTIONS
+# ENHANCED FILE VALIDATION
+# ================================
+
+def validate_uploaded_file(uploaded_file):
+    """Validate uploaded file before processing"""
+    try:
+        if uploaded_file is None:
+            return False, "No file uploaded"
+        
+        # Check file size
+        file_size = len(uploaded_file.getvalue())
+        file_size_mb = file_size / (1024 * 1024)
+        
+        if file_size_mb > 200:
+            return False, f"File too large: {file_size_mb:.1f}MB. Max 200MB allowed."
+        
+        if file_size_mb < 0.1:
+            return False, f"File too small: {file_size_mb:.1f}MB. Minimum 0.1MB required."
+        
+        # Check file type
+        allowed_types = ['mp4', 'mov', 'avi', 'mkv', 'webm']
+        file_extension = uploaded_file.name.split('.')[-1].lower()
+        
+        if file_extension not in allowed_types:
+            return False, f"Unsupported file type: {file_extension}. Allowed: {', '.join(allowed_types)}"
+        
+        return True, f"File validation passed ({file_size_mb:.1f}MB)"
+        
+    except Exception as e:
+        return False, f"File validation error: {str(e)}"
+
+# ================================
+# UTILITY FUNCTIONS
 # ================================
 
 def calculate_energy_score(results):
@@ -227,15 +258,15 @@ def save_results_to_database(results, venue_name="", venue_type="", user_name=""
         )
         
         if response.status_code == 201:
-            st.success("✅ Results saved to database!")
+            st.success("Results saved to database!")
             return True
         else:
-            st.error(f"❌ Database save failed: {response.status_code}")
+            st.error(f"Database save failed: {response.status_code}")
             st.error(f"Response: {response.text}")
             return False
             
     except Exception as e:
-        st.error(f"❌ Database error: {str(e)}")
+        st.error(f"Database error: {str(e)}")
         return False
 
 def load_all_results():
@@ -504,6 +535,158 @@ def analyze_mood_recognition(video_path):
             "overall_vibe": "neutral"
         }
 
+# ================================
+# ENHANCED VIDEO PROCESSING
+# ================================
+
+def safe_video_processing(uploaded_file, venue_name, venue_type, user_name):
+    """Process video with comprehensive error handling"""
+    temp_path = None
+    
+    try:
+        # Validate file first
+        is_valid, validation_message = validate_uploaded_file(uploaded_file)
+        
+        if not is_valid:
+            st.error(f"Upload Error: {validation_message}")
+            return None
+        
+        st.info(f"✅ {validation_message}")
+        
+        # Reset file pointer to beginning
+        uploaded_file.seek(0)
+        
+        # Create temporary file with proper extension
+        file_extension = uploaded_file.name.split('.')[-1].lower()
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}') as tmp_file:
+            # Read file in chunks to handle large files
+            chunk_size = 8192
+            total_size = len(uploaded_file.getvalue())
+            uploaded_file.seek(0)  # Reset to beginning
+            
+            progress_bar = st.progress(0)
+            bytes_written = 0
+            
+            while True:
+                chunk = uploaded_file.read(chunk_size)
+                if not chunk:
+                    break
+                tmp_file.write(chunk)
+                bytes_written += len(chunk)
+                progress = min(bytes_written / total_size, 1.0)
+                progress_bar.progress(progress)
+            
+            temp_path = tmp_file.name
+            progress_bar.progress(1.0)
+            st.success("File uploaded successfully!")
+        
+        # Verify file was written correctly
+        if not os.path.exists(temp_path):
+            raise Exception("Temporary file creation failed")
+        
+        file_size_on_disk = os.path.getsize(temp_path)
+        if file_size_on_disk == 0:
+            raise Exception("File appears to be empty after upload")
+        
+        st.info(f"Processing file: {file_size_on_disk / (1024*1024):.1f}MB")
+        
+        # Test video file accessibility
+        try:
+            test_video = VideoFileClip(temp_path)
+            duration = test_video.duration
+            fps = test_video.fps
+            test_video.close()
+            
+            st.info(f"Video info: {duration:.1f}s duration, {fps:.1f} FPS")
+            
+        except Exception as video_error:
+            raise Exception(f"Video file appears corrupted or unreadable: {str(video_error)}")
+        
+        # Process video analysis
+        with st.spinner("Analyzing venue video..."):
+            
+            # Step 1: Audio Analysis
+            st.text("Extracting audio features...")
+            try:
+                audio_results = extract_audio_features(temp_path)
+                st.success(f"Audio: {audio_results.get('bpm', 'N/A')} BPM, {audio_results.get('genre', 'Unknown')} genre")
+            except Exception as e:
+                st.warning(f"Audio analysis failed: {str(e)}")
+                audio_results = {
+                    "bpm": 90,
+                    "volume_level": 50,
+                    "genre": "unknown",
+                    "energy_level": "medium"
+                }
+            
+            # Step 2: Visual Analysis
+            st.text("Analyzing visual environment...")
+            try:
+                visual_results = analyze_visual_environment(temp_path)
+                st.success(f"Visual: {visual_results.get('lighting_type', 'Unknown')} lighting")
+            except Exception as e:
+                st.warning(f"Visual analysis failed: {str(e)}")
+                visual_results = {
+                    "brightness_level": 128,
+                    "lighting_type": "moderate",
+                    "color_scheme": "neutral",
+                    "visual_energy": "medium"
+                }
+            
+            # Step 3: Crowd Analysis
+            st.text("Detecting crowd density...")
+            try:
+                crowd_results = analyze_crowd_density(temp_path)
+                st.success(f"Crowd: {crowd_results.get('crowd_density', 'Unknown')} density")
+            except Exception as e:
+                st.warning(f"Crowd analysis failed: {str(e)}")
+                crowd_results = {
+                    "crowd_density": "moderate",
+                    "activity_level": "medium",
+                    "density_score": 5.0
+                }
+            
+            # Step 4: Mood Analysis
+            st.text("Analyzing mood...")
+            try:
+                mood_results = analyze_mood_recognition(temp_path)
+                st.success(f"Mood: {mood_results.get('dominant_mood', 'Unknown')} vibe")
+            except Exception as e:
+                st.warning(f"Mood analysis failed: {str(e)}")
+                mood_results = {
+                    "dominant_mood": "neutral",
+                    "confidence": 0.5,
+                    "overall_vibe": "neutral"
+                }
+        
+        # Combine all results
+        complete_results = {
+            "audio_environment": audio_results,
+            "visual_environment": visual_results,
+            "crowd_density": crowd_results,
+            "mood_recognition": mood_results
+        }
+        
+        return complete_results
+        
+    except Exception as e:
+        st.error(f"Video processing failed: {str(e)}")
+        st.error("Please try uploading a different video or check the file format.")
+        return None
+        
+    finally:
+        # Always cleanup temporary file
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except:
+                pass  # Ignore cleanup errors
+
+# ================================
+# VISUALIZATION FUNCTIONS
+# ================================
+
 def create_energy_donut_chart(results):
     """Create multi-ring donut chart with error handling"""
     try:
@@ -626,7 +809,7 @@ def display_results(results):
             st.plotly_chart(fig, use_container_width=True)
         
         # Detailed metrics
-        st.subheader("📊 Detailed Analysis")
+        st.subheader("Detailed Analysis")
         
         # Safe extraction with defaults
         audio_env = results.get("audio_environment") or {}
@@ -667,22 +850,22 @@ def display_results(results):
             """, unsafe_allow_html=True)
         
         # Additional details in expander
-        with st.expander("🔍 Detailed Breakdown"):
+        with st.expander("Detailed Breakdown"):
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.subheader("🎵 Audio")
+                st.subheader("Audio")
                 st.write(f"**Genre:** {audio_env.get('genre', 'Unknown')}")
                 st.write(f"**Volume:** {audio_env.get('volume_level', 'N/A')}")
                 st.write(f"**Energy:** {audio_env.get('energy_level', 'Unknown')}")
                 
             with col2:
-                st.subheader("👥 Crowd")
+                st.subheader("Crowd")
                 st.write(f"**Density:** {crowd_data.get('crowd_density', 'Unknown')}")
                 st.write(f"**Activity:** {crowd_data.get('activity_level', 'Unknown')}")
                 
             with col3:
-                st.subheader("💡 Visual")
+                st.subheader("Visual")
                 st.write(f"**Lighting:** {visual_env.get('lighting_type', 'Unknown')}")
                 st.write(f"**Colors:** {visual_env.get('color_scheme', 'Unknown')}")
                 st.write(f"**Energy:** {visual_env.get('visual_energy', 'Unknown')}")
@@ -695,7 +878,7 @@ def display_results(results):
 def display_all_results_page():
     """Display all results page with error handling"""
     try:
-        st.title("📊 All Venue Results")
+        st.title("All Venue Results")
         
         # Load results
         all_results = load_all_results()
@@ -742,7 +925,7 @@ def display_all_results_page():
 def main():
     try:
         # Header
-        st.title("🎯 SneakPeak - Venue Pulse Analyzer")
+        st.title("SneakPeak - Venue Pulse Analyzer")
         st.markdown("*AI-powered venue energy analysis from your videos*")
         
         # Navigation
@@ -755,11 +938,11 @@ def main():
         if page == "Upload & Analyze":
             # Upload section
             st.markdown('<div class="upload-section">', unsafe_allow_html=True)
-            st.subheader("📱 Upload Your Venue Video")
+            st.subheader("Upload Your Venue Video")
             
             # Mobile-optimized input fields
             venue_name = st.text_input(
-                "🏢 Venue Name",
+                "Venue Name",
                 placeholder="e.g., The Rooftop Bar",
                 help="What's the name of the place?"
             )
@@ -768,76 +951,65 @@ def main():
             
             with col1:
                 venue_type = st.selectbox(
-                    "🎭 Venue Type",
+                    "Venue Type",
                     ["Bar", "Club", "Restaurant", "Lounge", "Rooftop", "Beach Club", "Other"]
                 )
             
             with col2:
                 user_name = st.text_input(
-                    "👤 Your Name (Optional)",
+                    "Your Name (Optional)",
                     placeholder="Anonymous",
                     help="Credits for the content"
                 )
             
+            # Enhanced file uploader with better messaging
             uploaded_file = st.file_uploader(
                 "Choose a video file",
-                type=['mp4', 'mov', 'avi', 'mkv'],
-                help="Upload a video from the venue (max 200MB)"
+                type=['mp4', 'mov', 'avi', 'mkv', 'webm'],
+                help="Upload a video from the venue (max 200MB). For best results: 15-60 seconds, clear audio, good lighting."
             )
+            
+            # Upload tips
+            if uploaded_file is None:
+                st.info("""
+                **Video Upload Tips:**
+                - Record 15-60 seconds of the venue
+                - Include audio for BPM detection  
+                - Show crowd and lighting conditions
+                - Avoid shaky camera movement
+                - File size: 0.1MB - 200MB
+                """)
             
             st.markdown('</div>', unsafe_allow_html=True)
             
-            if uploaded_file is not None:
-                # Process video
-                with st.spinner("🔄 Analyzing your venue video..."):
-                    # Save uploaded file
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
-                        tmp_file.write(uploaded_file.read())
-                        temp_path = tmp_file.name
+            # Process video when uploaded
+            if uploaded_file is not None and venue_name:
+                # Process with enhanced error handling
+                complete_results = safe_video_processing(uploaded_file, venue_name, venue_type, user_name)
+                
+                if complete_results:
+                    # Display results
+                    st.success("Analysis complete!")
+                    display_results(complete_results)
                     
-                    try:
-                        # Analyze video components
-                        st.text("Extracting audio features...")
-                        audio_results = extract_audio_features(temp_path)
-                        
-                        st.text("Analyzing visual environment...")
-                        visual_results = analyze_visual_environment(temp_path)
-                        
-                        st.text("Detecting crowd density...")
-                        crowd_results = analyze_crowd_density(temp_path)
-                        
-                        st.text("Analyzing mood...")
-                        mood_results = analyze_mood_recognition(temp_path)
-                        
-                        # Combine results
-                        complete_results = {
-                            "audio_environment": audio_results,
-                            "visual_environment": visual_results,
-                            "crowd_density": crowd_results,
-                            "mood_recognition": mood_results
-                        }
-                        
-                        # Display results
-                        st.success("Analysis complete!")
-                        display_results(complete_results)
-                        
-                        # Save to database
-                        if st.button("Save Results", type="primary"):
-                            if save_results_to_database(complete_results, venue_name, venue_type, user_name):
-                                st.balloons()
-                        
-                    except Exception as e:
-                        st.error(f"Analysis error: {str(e)}")
-                    finally:
-                        # Cleanup
-                        if os.path.exists(temp_path):
-                            os.unlink(temp_path)
-                            
+                    # Save to database
+                    st.markdown("---")
+                    if st.button("Save Results to Database", type="primary"):
+                        if save_results_to_database(complete_results, venue_name, venue_type, user_name):
+                            st.balloons()
+                            st.success("Results saved! Check 'View All Results' to see your data.")
+                        else:
+                            st.error("Failed to save results. Please try again.")
+                
+            elif uploaded_file is not None and not venue_name:
+                st.warning("Please enter a venue name before processing the video.")
+                    
         elif page == "View All Results":
             display_all_results_page()
             
     except Exception as e:
         st.error(f"Application error: {str(e)}")
+        st.error("Please refresh the page and try again.")
 
 if __name__ == "__main__":
     main()
