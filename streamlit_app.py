@@ -34,6 +34,7 @@ import librosa
 import soundfile as sf
 from PIL import Image
 import cv2
+from streamlit_geolocation import geolocation
 
 # ============================================
 # CONFIG & INITIALIZATION
@@ -120,94 +121,22 @@ if 'user' not in st.session_state:
     st.session_state.user = None
 if 'user_location' not in st.session_state:
     st.session_state.user_location = None
+if 'show_confirm_notice' not in st.session_state:
+    st.session_state.show_confirm_notice = False
+if 'last_signup_email' not in st.session_state:
+    st.session_state.last_signup_email = None
+
+# --- Restore Supabase session if available ---
+try:
+    sb_session = supabase.auth.get_session()
+    if sb_session and getattr(sb_session, "user", None) and not st.session_state.user:
+        st.session_state.user = sb_session.user
+except Exception:
+    pass
 
 # ============================================
 # UTILITIES
 # ============================================
-
-def get_location_component():
-    """Streamlit component that requests browser geolocation."""
-    js_code = """
-    <script>
-    function getLocation() {
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (position) => {
-            const data = {
-              latitude: position.coords.latitude,
-              longitude: position.coords.longitude,
-              accuracy: position.coords.accuracy,
-              error: null
-            };
-            window.parent.postMessage({
-              type: 'streamlit:setComponentValue',
-              componentId: 'user_location',
-              value: data
-            }, '*');
-          },
-          (error) => {
-            const data = {
-              latitude: null, longitude: null, accuracy: null,
-              error: error.message
-            };
-            window.parent.postMessage({
-              type: 'streamlit:setComponentValue',
-              componentId: 'user_location',
-              value: data
-            }, '*');
-          }
-        );
-      } else {
-        const data = {
-          latitude: null, longitude: null, accuracy: null,
-          error: "Geolocation is not supported by this browser."
-        };
-        window.parent.postMessage({
-          type: 'streamlit:setComponentValue',
-          componentId: 'user_location',
-          value: data
-        }, '*');
-      }
-    }
-    getLocation();
-    </script>
-    """
-    components.html(js_code, height=0, width=0, key='user_location')
-
-def upload_video_to_supabase(uploaded_file, video_id):
-    """Upload video file to Supabase Storage."""
-    try:
-        file_extension = uploaded_file.name.split('.')[-1].lower()
-        filename = f"{video_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
-
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": uploaded_file.type or "application/octet-stream",
-        }
-
-        resp = requests.post(
-            f"{SUPABASE_URL}/storage/v1/object/videos/{filename}",
-            headers=headers,
-            data=uploaded_file.getvalue(),
-            timeout=60
-        )
-
-        if resp.status_code in (200, 201):
-            video_url = f"{SUPABASE_URL}/storage/v1/object/public/videos/{filename}"
-            return video_url, filename
-        else:
-            st.error(f"Video upload failed: {resp.status_code}")
-            if resp.text:
-                st.error(f"Error details: {resp.text}")
-            return None, None
-
-    except requests.exceptions.RequestException as e:
-        st.error(f"Network error during video upload: {str(e)}")
-        return None, None
-    except Exception as e:
-        st.error(f"Error uploading video: {str(e)}")
-        return None, None
 
 def verify_venue_location(latitude, longitude, venue_name):
     """Very rough NYC bounds check."""
@@ -262,7 +191,6 @@ def calculate_energy_score(results):
 # ---------- ACRCloud helpers ----------
 def generate_acrcloud_signature(timestamp: str, data_type="audio", signature_version="1"):
     """
-    Per ACRCloud docs:
     string_to_sign = "POST\n{endpoint}\n{access_key}\n{data_type}\n{signature_version}\n{timestamp}"
     signature = base64(hmac_sha1(secret_key, string_to_sign))
     """
@@ -501,10 +429,7 @@ def analyze_mood_recognition_with_vision_api(image_path):
             mood_counts["anger"] += 3 if anger == "VERY_LIKELY" else 2 if anger == "LIKELY" else 1 if anger == "POSSIBLE" else 0
             mood_counts["surprise"] += 3 if surprise == "VERY_LIKELY" else 2 if surprise == "LIKELY" else 1 if surprise == "POSSIBLE" else 0
 
-        if sum(mood_counts.values()) == 0:
-            dominant_mood_key = "undetermined"
-        else:
-            dominant_mood_key = max(mood_counts, key=mood_counts.get)
+        dominant_mood_key = max(mood_counts, key=mood_counts.get) if sum(mood_counts.values()) else "undetermined"
 
         mood_map = {
             "joy": "Happy",
@@ -541,6 +466,36 @@ def save_to_supabase(results, uploaded_file=None):
     """Save results and optionally store the video."""
     try:
         video_id = str(uuid.uuid4())
+
+        def upload_video_to_supabase(uploaded_file, video_id):
+            try:
+                file_extension = uploaded_file.name.split('.')[-1].lower()
+                filename = f"{video_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{file_extension}"
+                headers = {
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": uploaded_file.type or "application/octet-stream",
+                }
+                resp = requests.post(
+                    f"{SUPABASE_URL}/storage/v1/object/videos/{filename}",
+                    headers=headers,
+                    data=uploaded_file.getvalue(),
+                    timeout=60
+                )
+                if resp.status_code in (200, 201):
+                    video_url = f"{SUPABASE_URL}/storage/v1/object/public/videos/{filename}"
+                    return video_url, filename
+                else:
+                    st.error(f"Video upload failed: {resp.status_code}")
+                    if resp.text:
+                        st.error(f"Error details: {resp.text}")
+                    return None, None
+            except requests.exceptions.RequestException as e:
+                st.error(f"Network error during video upload: {str(e)}")
+                return None, None
+            except Exception as e:
+                st.error(f"Error uploading video: {str(e)}")
+                return None, None
 
         video_url = None
         video_filename = None
@@ -645,6 +600,42 @@ def load_video_by_id(video_id):
         st.error(f"❌ Database error during video load: {str(e)}")
         return None
 
+# ---------- AUTH HELPERS ----------
+def handle_login(email, password):
+    try:
+        resp = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        if resp and getattr(resp, "user", None):
+            st.session_state.user = resp.user
+            st.success("Logged in successfully!")
+            st.toast("Logged in ✅", icon="✅")
+        else:
+            st.error("Login failed. Please check your credentials.")
+    except Exception as e:
+        st.error(f"Login failed: {e}")
+
+def handle_signup(email, password):
+    try:
+        resp = supabase.auth.sign_up({"email": email, "password": password})
+        st.session_state.last_signup_email = email
+        st.session_state.show_confirm_notice = True
+
+        # Feedback for both "confirm required" and "no confirm" setups
+        if resp and getattr(resp, "user", None):
+            st.success("Account created!")
+        st.info("We’ve sent a confirmation email. Please click the link to activate your account.")
+        st.toast("Check your email to confirm your signup", icon="✉️")
+    except Exception as e:
+        st.error(f"Sign up failed: {e}")
+
+def handle_logout():
+    try:
+        supabase.auth.sign_out()
+    except Exception:
+        pass
+    st.session_state.user = None
+    st.success("Logged out successfully!")
+    st.toast("Logged out", icon="👋")
+
 # ---------- UI ----------
 def display_results(results):
     st.subheader(f"📊 Analysis Results for {results['venue_name']}")
@@ -679,14 +670,15 @@ def display_results(results):
     with st.expander("🕺 Crowd & Mood"):
         st.markdown(f"**Crowd Density:** {results.get('crowd_density', {}).get('crowd_density', results.get('crowd_density','N/A'))}")
         st.markdown(f"**Activity Level:** {results.get('activity_level', results.get('crowd_density',{}).get('activity_level','N/A'))}")
-        st.markdown(f"**Dominant Mood:** {results.get('dominant_mood', results['mood_recognition']['dominant_mood'])}"
-                    f" (Confidence: {float(results.get('mood_confidence', results['mood_recognition']['confidence'])):.2f})")
+        st.markdown(
+            f"**Dominant Mood:** {results.get('dominant_mood', results['mood_recognition']['dominant_mood'])}"
+            f" (Confidence: {float(results.get('mood_confidence', results['mood_recognition']['confidence'])):.2f})"
+        )
 
         # Mood breakdown chart
         if "mood_recognition" in results and "mood_breakdown" in results["mood_recognition"]:
             data_items = list(results["mood_recognition"]["mood_breakdown"].items())
         else:
-            # if loaded from DB without nested structure
             data_items = [("n/a", 1.0)]
         mood_df = pd.DataFrame(data_items, columns=["Mood", "Confidence"]).sort_values(by="Confidence", ascending=False)
 
@@ -729,30 +721,30 @@ def display_all_results_page():
     else:
         st.warning("Please log in to view your uploaded videos.")
 
-def handle_login(email, password):
-    try:
-        user = supabase.auth.sign_in_with_password({"email": email, "password": password}).user
-        st.session_state.user = user
-        st.success("Logged in successfully!")
-    except Exception as e:
-        st.error(f"Login failed: {e}")
-
-def handle_signup(email, password):
-    try:
-        user = supabase.auth.sign_up({"email": email, "password": password}).user
-        st.session_state.user = user
-        st.success("Signed up and logged in successfully! Check your email to confirm.")
-    except Exception as e:
-        st.error(f"Sign up failed: {e}")
-
-def handle_logout():
-    supabase.auth.sign_out()
-    st.session_state.user = None
-    st.success("Logged out successfully!")
-
 # ---------- APP ----------
 def main():
     st.markdown('<div class="main-header"><h1>SneakPeak Video Scorer</h1><p>A tool for real-time venue intelligence</p></div>', unsafe_allow_html=True)
+
+    # If we just signed up, show a prominent banner + help
+    if st.session_state.show_confirm_notice:
+        st.warning("Finish setting up your account: **check your email and click the confirmation link** to activate your login.")
+        with st.expander("Having trouble confirming your email?"):
+            st.markdown("""
+- If the link doesn't open, copy the URL from the email and paste it directly into your browser.
+- If you see “**this site can't be reached**,” the project’s Auth redirect URL may be misconfigured.
+  - In Supabase Dashboard → **Authentication → URL Configuration**, set **Site URL** (and **Redirect URLs**, if used) to your app’s deployed URL.
+- You can also try sending the email again with the button below.
+            """)
+        # Best-effort resend button
+        if st.session_state.last_signup_email:
+            if st.button("Resend confirmation email"):
+                try:
+                    # Some SDKs expose `resend` for signup confirmation; this may be a no-op on certain setups.
+                    supabase.auth.resend({"type": "signup", "email": st.session_state.last_signup_email})
+                    st.success("Confirmation email re-sent. Please check your inbox.")
+                    st.toast("Confirmation email sent ✉️", icon="✉️")
+                except Exception as e:
+                    st.error(f"Could not resend confirmation email: {e}")
 
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Go to", ["Upload & Analyze", "View My Videos"])
@@ -762,18 +754,20 @@ def main():
         st.sidebar.success(f"Logged in as {st.session_state.user.email}")
         if st.sidebar.button("Log Out"):
             handle_logout()
-            st.rerun()
     else:
-        with st.sidebar.form("auth_form"):
-            email = st.text_input("Email")
-            password = st.text_input("Password", type="password")
-            login_button = st.form_submit_button("Log In")
-            signup_button = st.form_submit_button("Sign Up")
-            if login_button:
-                handle_login(email, password); st.rerun()
-            if signup_button:
-                handle_signup(email, password); st.rerun()
-        st.sidebar.text("You are currently not logged in.")
+        auth_tab = st.sidebar.tabs(["Log In", "Sign Up"])
+        with auth_tab[0]:
+            with st.form("login_form", clear_on_submit=False):
+                lemail = st.text_input("Email", key="login_email")
+                lpass = st.text_input("Password", type="password", key="login_pass")
+                if st.form_submit_button("Log In"):
+                    handle_login(lemail, lpass)
+        with auth_tab[1]:
+            with st.form("signup_form", clear_on_submit=False):
+                semail = st.text_input("Email", key="signup_email")
+                spass = st.text_input("Password", type="password", key="signup_pass")
+                if st.form_submit_button("Sign Up"):
+                    handle_signup(semail, spass)
 
     if page == "Upload & Analyze":
         st.header("Upload a Video")
@@ -792,22 +786,22 @@ def main():
                 )
 
                 st.subheader("GPS Location")
-                if st.form_submit_button("Get Current Location"):
-                    get_location_component()
-                    st.rerun()
-
-                if st.session_state.user_location:
-                    if st.session_state.user_location.get("error"):
-                        st.error(f"Error getting location: {st.session_state.user_location['error']}")
-                        latitude = longitude = accuracy = None
-                    else:
-                        latitude = st.session_state.user_location["latitude"]
-                        longitude = st.session_state.user_location["longitude"]
-                        accuracy = st.session_state.user_location["accuracy"]
-                        st.success("✅ Location fetched successfully! The data will be saved with the video.")
+                st.caption("Tap the button below and grant location permission in your browser.")
+                loc = geolocation(key="geo")  # renders 'Get location' button; returns dict
+                if loc and isinstance(loc, dict) and "latitude" in loc and "longitude" in loc:
+                    latitude = loc.get("latitude")
+                    longitude = loc.get("longitude")
+                    accuracy = loc.get("accuracy")
+                    st.session_state.user_location = {"latitude": latitude, "longitude": longitude, "accuracy": accuracy}
+                    st.success("✅ Location fetched successfully! The data will be saved with the video.")
                 else:
-                    st.info("Click 'Get Current Location' to fetch GPS coordinates.")
-                    latitude = longitude = accuracy = None
+                    if st.session_state.user_location:
+                        latitude = st.session_state.user_location.get("latitude")
+                        longitude = st.session_state.user_location.get("longitude")
+                        accuracy  = st.session_state.user_location.get("accuracy")
+                    else:
+                        latitude = longitude = accuracy = None
+                        st.info("Click **Get location** to fetch GPS coordinates.")
 
                 uploaded_file = st.file_uploader("Choose a video file (max 200MB)...", type=["mp4", "mov", "avi"])
                 submitted = st.form_submit_button("Start Analysis")
@@ -883,6 +877,7 @@ def main():
                             if saved:
                                 st.session_state.processed_videos.append(saved)
                                 st.success("Analysis complete!")
+                                st.toast("Analysis complete ✅", icon="✅")
                                 display_results(saved)
 
                     except Exception as e:
