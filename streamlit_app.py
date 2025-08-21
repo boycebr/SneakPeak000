@@ -1,6 +1,7 @@
 # streamlit_app.py
 # SneakPeak Video Scorer — uses authed Supabase client for Storage + DB (fixes 403)
 # and does not send 'id' on inserts (fixes bigint/UUID error).
+# UPDATED: persists/restores Supabase session so the client is truly "authed".
 
 import os
 import io
@@ -72,6 +73,17 @@ if SUPABASE_LIB_OK:
 else:
     st.error("supabase>=2.x is not installed; please add it to requirements.txt")
 
+# --- NEW: restore a saved session so the client stays authed across reruns -------------
+if supabase:
+    if "access_token" in st.session_state and st.session_state.access_token:
+        try:
+            supabase.auth.set_session(
+                access_token=st.session_state.access_token,
+                refresh_token=st.session_state.get("refresh_token", "")
+            )
+        except Exception:
+            pass
+
 # --------------------------------------------------------------------------------------
 # Page + diagnostics (keep visible while testing)
 # --------------------------------------------------------------------------------------
@@ -113,7 +125,6 @@ def calculate_energy_score(results: dict) -> float:
         return 50.0
 
 def generate_acrcloud_signature(timestamp: str) -> str:
-    # per ACRCloud docs, proper string_to_sign uses data_type/signature_version – using simple variant here
     string_to_sign = f"POST\n{ACRCLOUD_API_ENDPOINT}\n{ACRCLOUD_ACCESS_KEY}\n{timestamp}"
     h = hmac.new(ACRCLOUD_SECRET_KEY.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha1)
     return base64.b64encode(h.digest()).decode("utf-8")
@@ -321,13 +332,11 @@ def upload_video_to_storage(uploaded_file, user_id: str) -> tuple[str|None, str|
         filename = f"{user_id}/{uuid.uuid4().hex}.{ext}"  # user-scoped path
         data = uploaded_file.getvalue()
         content_type = uploaded_file.type or "application/octet-stream"
-        # This call includes the user's JWT automatically
         resp = supabase.storage.from_("videos").upload(
             path=filename,
             file=data,
             file_options={"content-type": content_type, "x-upsert": "false"}
         )
-        # If no exception, it's uploaded; build public URL
         public_url = f"{SUPABASE_URL}/storage/v1/object/public/videos/{filename}"
         return public_url, filename
     except Exception as e:
@@ -346,7 +355,6 @@ def save_results_row(results: dict, uploaded_file=None):
         video_url, video_path = upload_video_to_storage(uploaded_file, user_id)
 
     row = {
-        # no 'id' here; table's serial/bigint will be auto-generated
         "user_id": user_id,  # UUID
         "venue_name": str(results["venue_name"])[:100],
         "venue_type": str(results["venue_type"])[:50],
@@ -397,7 +405,15 @@ def handle_login(email: str, password: str):
         return
     try:
         resp = supabase.auth.sign_in_with_password({"email": email, "password": password})
+        # Save user + tokens in session state and set client session (NEW)
         st.session_state.user = resp.user
+        if resp.session:
+            st.session_state.access_token = resp.session.access_token
+            st.session_state.refresh_token = resp.session.refresh_token
+            supabase.auth.set_session(
+                access_token=st.session_state.access_token,
+                refresh_token=st.session_state.refresh_token,
+            )
         st.success("Logged in.")
         st.rerun()
     except Exception as e:
@@ -418,7 +434,8 @@ def handle_logout():
         supabase.auth.sign_out()
     except Exception:
         pass
-    st.session_state.user = None
+    for k in ("user", "access_token", "refresh_token"):
+        st.session_state.pop(k, None)
     st.success("Logged out.")
     st.rerun()
 
@@ -427,9 +444,9 @@ def handle_logout():
 # --------------------------------------------------------------------------------------
 st.sidebar.header("Account")
 if st.session_state.user:
-    sess = supabase.auth.get_session()
+    sess = supabase.auth.get_session() if supabase else None
     st.sidebar.success(f"Logged in as {st.session_state.user.email}")
-    st.sidebar.caption(f"Authed client: {bool(sess and sess.access_token)}")  # quick sanity check
+    st.sidebar.caption(f"Authed client: {bool(sess and getattr(sess, 'access_token', None))}")  # sanity check
     if st.sidebar.button("Log Out"):
         handle_logout()
 else:
