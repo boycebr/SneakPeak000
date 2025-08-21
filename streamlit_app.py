@@ -27,23 +27,29 @@ except Exception:
 # MoviePy (we’ll also verify ffmpeg below)
 try:
     from moviepy.editor import VideoFileClip
-    HAS_MOVIEPY = True
+    from moviepy.config import change_settings as mvpy_change_settings
+    HAS_MOVIEPY_IMPORT = True
 except Exception:
     VideoFileClip = None
-    HAS_MOVIEPY = False
+    mvpy_change_settings = None
+    HAS_MOVIEPY_IMPORT = False
 
-# Try to detect a bundled ffmpeg from imageio-ffmpeg
+# Try to detect a bundled ffmpeg from imageio-ffmpeg and make MoviePy use it
 HAS_FFMPEG = False
+FFMPEG_BINARY = None
 try:
     import imageio_ffmpeg
     FFMPEG_BINARY = imageio_ffmpeg.get_ffmpeg_exe()  # downloads/locates ffmpeg if needed
-    HAS_FFMPEG = bool(FFMPEG_BINARY)
+    if FFMPEG_BINARY:
+        # Make sure both env var and MoviePy know where ffmpeg is
+        os.environ["IMAGEIO_FFMPEG_EXE"] = FFMPEG_BINARY
+        if mvpy_change_settings:
+            mvpy_change_settings({"FFMPEG_BINARY": FFMPEG_BINARY})
+        HAS_FFMPEG = True
 except Exception:
     FFMPEG_BINARY = None
 
-# If ffmpeg is missing, we can't do full audio analysis via MoviePy
-if HAS_MOVIEPY and not HAS_FFMPEG:
-    HAS_MOVIEPY = False
+HAS_MOVIEPY = bool(HAS_MOVIEPY_IMPORT and HAS_FFMPEG)
 
 from supabase import create_client, Client
 import librosa
@@ -93,12 +99,20 @@ except Exception as e:
     st.error(f"Failed to initialize Supabase client. Check SUPABASE_URL/KEY.\n\nDetails: {e}")
     st.stop()
 
-# ---- Health warnings (do NOT hide: you asked to see them) ----
-if not GOOGLE_VISION_API_KEY:
-    st.warning("Google Vision API key is not set. Visual analysis will fail. Add GOOGLE_VISION_API_KEY to Secrets or keep the embedded fallback.")
-if not (ACRCLOUD_ACCESS_KEY and ACRCLOUD_SECRET_KEY):
-    st.warning("ACRCloud keys are not set. Genre detection will fall back to 'Unknown'. Add ACRCLOUD_ACCESS_KEY and ACRCLOUD_SECRET_KEY to Secrets.")
-if not HAS_MOVIEPY:
+# ---- Health messages (do NOT hide: you asked to see them) ----
+if GOOGLE_VISION_API_KEY:
+    st.info("Google Vision API is configured.")
+else:
+    st.warning("Google Vision API key is not set. Visual analysis will fail.")
+
+if ACRCLOUD_ACCESS_KEY and ACRCLOUD_SECRET_KEY:
+    st.info("ACRCloud API is configured.")
+else:
+    st.warning("ACRCloud keys are not set. Genre detection will fall back to 'Unknown'.")
+
+if HAS_MOVIEPY:
+    st.info(f"MoviePy/ffmpeg detected. Using ffmpeg at: {FFMPEG_BINARY}")
+else:
     st.warning("MoviePy/ffmpeg not detected. Audio analysis will be limited.")
 
 # ============================================
@@ -372,6 +386,29 @@ def get_single_frame_from_video(video_path):
         st.error(f"Frame extraction error: {e}")
         return None
 
+def save_user_rating(venue_id, user_id, rating, venue_name, venue_type):
+    """Persist a user's rating to Supabase (table: user_ratings)."""
+    try:
+        data = {
+            "venue_id": str(venue_id),
+            "user_id": str(user_id)[:64],
+            "rating": int(rating),
+            "venue_name": str(venue_name)[:100],
+            "venue_type": str(venue_type)[:50],
+            "rated_at": datetime.utcnow().isoformat()
+        }
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/user_ratings", headers=headers, json=data, timeout=30)
+        return r.status_code == 201
+    except Exception as e:
+        st.error(f"Network/DB error saving rating: {e}")
+        return False
+
 def save_to_supabase(results, uploaded_file=None):
     try:
         video_id = str(uuid.uuid4())
@@ -475,7 +512,6 @@ def handle_login(email, password):
         else:
             st.error("Login failed. Please check your credentials.")
     except Exception as e:
-        # Common causes: invalid API key, email not confirmed, wrong URL
         st.error(f"Login failed: {e}")
 
 def handle_signup(email, password):
@@ -558,7 +594,8 @@ def display_all_results_page():
                         c2.metric("Energy Score", f"{float(v.get('energy_score', 0)):.2f}/100")
                         rating = st.slider("Rate this video (1-5):", 1, 5, 3, key=f"slider_{v['id']}")
                         if st.button(f"Submit Rating for {v.get('venue_name','this venue')}", key=f"btn_{v['id']}"):
-                            st.success("Thank you for your rating!")
+                            ok = save_user_rating(v["id"], st.session_state.user.id, rating, v.get("venue_name",""), v.get("venue_type",""))
+                            st.success("Your rating has been submitted!" if ok else "There was an error submitting your rating.")
                         st.json(v)
                 else:
                     st.error("❌ A video record was found but is missing a unique ID. Skipping display.")
@@ -571,7 +608,10 @@ def display_all_results_page():
 def main():
     st.markdown('<div class="main-header"><h1>SneakPeak Video Scorer</h1><p>A tool for real-time venue intelligence</p></div>', unsafe_allow_html=True)
 
-    if not HAS_MOVIEPY:
+    # Show single consolidated health message about MoviePy/ffmpeg
+    if HAS_MOVIEPY:
+        st.info(f"MoviePy/ffmpeg is ready. Binary: {FFMPEG_BINARY}")
+    else:
         st.warning("MoviePy/ffmpeg not detected. Audio analysis will be limited.")
 
     # Post-signup banner
