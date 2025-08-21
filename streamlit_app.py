@@ -41,7 +41,6 @@ try:
     import imageio_ffmpeg
     FFMPEG_BINARY = imageio_ffmpeg.get_ffmpeg_exe()  # downloads/locates ffmpeg if needed
     if FFMPEG_BINARY:
-        # Make sure both env var and MoviePy know where ffmpeg is
         os.environ["IMAGEIO_FFMPEG_EXE"] = FFMPEG_BINARY
         if mvpy_change_settings:
             mvpy_change_settings({"FFMPEG_BINARY": FFMPEG_BINARY})
@@ -69,8 +68,6 @@ st.set_page_config(
 
 # ============================================
 # CONFIG & INIT
-# - Read from Secrets first; if absent, fall back to embedded defaults (your keys).
-# - Show clear warnings so issues are visible during testing.
 # ============================================
 
 # ---- Embedded defaults (as requested) ----
@@ -170,7 +167,33 @@ except Exception:
     pass
 
 # ============================================
-# HELPERS
+# CONSTANTS (tunable)
+# ============================================
+# Sampling
+BASE_FPS_STANDARD = 1.0      # 1 fps (default)
+BASE_FPS_SLOW     = 0.5      # 0.5 fps (1 frame every 2s)
+MAX_FRAMES        = 60       # hard cap
+MIN_COVERAGE_SEC  = 4.0      # warmup before early-stop can trigger
+
+# Motion adaptation (very static)
+STATIC_THRESH       = 0.02   # rolling median below this => static
+WAKE_THRESH         = 0.05   # rolling median above this => wake / return to faster rate
+STATIC_CONSEC_NEED  = 5      # seconds below threshold to engage slow mode
+WAKE_CONSEC_NEED    = 3      # seconds above wake threshold to release slow mode
+ROLL_WINDOW         = 5      # seconds window for rolling median
+
+# Unique convergence (no new faces for 2s)
+NO_NEW_SEC          = 2.0    # required idle secs before early-stop
+CONFIRM_FRAMES_NEED = 2      # frames needed to confirm a new track
+MAX_MISSES          = 5      # frames before deleting a track
+IOU_THRESH          = 0.3    # gating
+COLOR_WEIGHT        = 0.3    # in matching cost (1 - IoU)*0.7 + color*0.3
+
+# Vision cadence
+VISION_MIN_GAP_SEC  = 4.0    # minimum gap between Vision mood calls
+
+# ============================================
+# HELPERS: Audio (unchanged behavior)
 # ============================================
 def calculate_energy_score(results):
     try:
@@ -217,7 +240,6 @@ def extract_audio_features(video_path):
         elif tempo < 90 or volume_level < 10:
             energy_level = "Low"
 
-        # ACRCloud genre (optional)
         if not (ACRCLOUD_ACCESS_KEY and ACRCLOUD_SECRET_KEY):
             return {"bpm": int(tempo), "volume_level": volume_level, "genre": "Unknown", "energy_level": energy_level}
 
@@ -260,6 +282,9 @@ def extract_audio_features(video_path):
         if temp_audio_path and os.path.exists(temp_audio_path):
             os.unlink(temp_audio_path)
 
+# ============================================
+# HELPERS: Vision API (unchanged endpoints)
+# ============================================
 def _vision_annotate(image_path, features):
     if not GOOGLE_VISION_API_KEY:
         raise RuntimeError("Google Vision API key missing.")
@@ -362,32 +387,337 @@ def analyze_mood_recognition_with_vision_api(image_path):
         st.error(f"Mood analysis error: {e}")
         return {}
 
-def get_single_frame_from_video(video_path):
-    temp_image_path = None
-    try:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            st.error("Error: Could not open video file.")
-            return None
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-        mid = frame_count // 2
-        cap.set(cv2.CAP_PROP_POS_FRAMES, mid)
-        ret, frame = cap.read()
-        cap.release()
-        if not ret:
-            st.error("Error: Could not read frame from video.")
-            return None
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-        cv2.imwrite(tmp.name, frame)
-        temp_image_path = tmp.name
-        tmp.close()
-        return temp_image_path
-    except Exception as e:
-        st.error(f"Frame extraction error: {e}")
-        return None
+# ============================================
+# LOCAL DETECTION + TRACKING (people count)
+# ============================================
 
+# HOG person detector (local, no API)
+_HOG = cv2.HOGDescriptor()
+_HOG.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+
+# For optional face-only local fallback (not used for count; Vision is used for mood)
+_FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
+def detect_persons(frame_bgr):
+    # Downscale for speed
+    scale = 0.75
+    h, w = frame_bgr.shape[:2]
+    resized = cv2.resize(frame_bgr, (int(w*scale), int(h*scale)))
+    rects, weights = _HOG.detectMultiScale(resized, winStride=(8,8), padding=(8,8), scale=1.05)
+    boxes = []
+    for (x,y,wc,hc) in rects:
+        x1 = int(x/scale); y1 = int(y/scale); x2 = int((x+wc)/scale); y2 = int((y+hc)/scale)
+        boxes.append([x1,y1,x2,y2])
+    return boxes
+
+def detect_faces_local(frame_gray):
+    faces = _FACE_CASCADE.detectMultiScale(frame_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30,30))
+    boxes = []
+    for (x,y,w,h) in faces:
+        boxes.append([x, y, x+w, y+h])
+    return boxes
+
+def iou(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    inter_x1 = max(ax1, bx1); inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2); inter_y2 = min(ay2, by2)
+    iw = max(0, inter_x2 - inter_x1); ih = max(0, inter_y2 - inter_y1)
+    inter = iw * ih
+    if inter == 0: return 0.0
+    area_a = (ax2-ax1)*(ay2-ay1)
+    area_b = (bx2-bx1)*(by2-by1)
+    return inter / float(area_a + area_b - inter + 1e-6)
+
+def crop_and_hist(frame_bgr, box, bins=(16,16,16)):
+    x1,y1,x2,y2 = [int(v) for v in box]
+    x1 = max(0,x1); y1=max(0,y1); x2=min(frame_bgr.shape[1]-1,x2); y2=min(frame_bgr.shape[0]-1,y2)
+    if x2<=x1 or y2<=y1:
+        return np.zeros((sum(bins),), dtype=np.float32)
+    crop = frame_bgr[y1:y2, x1:x2]
+    hist = []
+    for ch in range(3):
+        h = cv2.calcHist([crop],[ch],None,[bins[ch]],[0,256])
+        h = cv2.normalize(h, None).flatten()
+        hist.append(h)
+    return np.concatenate(hist).astype(np.float32)
+
+def hist_distance(h1, h2):
+    # Bhattacharyya distance via OpenCV compareHist
+    if h1 is None or h2 is None: return 1.0
+    # split back to 3 channels (not necessary; compare as 1D)
+    d = cv2.compareHist(h1.astype(np.float32), h2.astype(np.float32), cv2.HISTCMP_BHATTACHARYYA)
+    return float(np.clip(d, 0.0, 1.0))
+
+class Track:
+    __slots__ = ("tid","bbox","hist","hits_consec","total_hits","misses","confirmed","first_confirm_s","last_seen_s","centroids")
+    def __init__(self, tid, bbox, hist, now_s):
+        self.tid = tid
+        self.bbox = bbox
+        self.hist = hist
+        self.hits_consec = 1
+        self.total_hits = 1
+        self.misses = 0
+        self.confirmed = False
+        self.first_confirm_s = None
+        self.last_seen_s = now_s
+        self.centroids = [self._centroid(bbox)]
+    def _centroid(self, b):
+        x1,y1,x2,y2 = b
+        return ((x1+x2)/2.0, (y1+y2)/2.0)
+    def update(self, bbox, hist, now_s):
+        self.bbox = bbox
+        self.hist = hist
+        self.hits_consec += 1
+        self.total_hits += 1
+        self.misses = 0
+        self.last_seen_s = now_s
+        self.centroids.append(self._centroid(bbox))
+        if not self.confirmed and self.hits_consec >= CONFIRM_FRAMES_NEED:
+            self.confirmed = True
+            self.first_confirm_s = now_s
+    def mark_missed(self):
+        self.misses += 1
+        self.hits_consec = 0
+
+class Tracker:
+    def __init__(self):
+        self.tracks = []
+        self.next_id = 1
+        self.unique_confirmed = 0
+        self.new_confirmed_this_frame = 0
+
+    def _match(self, frame_bgr, dets, now_s):
+        # Greedy matching by lowest cost
+        used = set()
+        self.new_confirmed_this_frame = 0
+        for tr in self.tracks:
+            best_idx = -1
+            best_cost = 1e9
+            for i, d in enumerate(dets):
+                if i in used: continue
+                iou_v = iou(tr.bbox, d)
+                if iou_v < IOU_THRESH: 
+                    continue
+                hist_d = hist_distance(tr.hist, crop_and_hist(frame_bgr, d))
+                cost = 0.7*(1.0 - iou_v) + COLOR_WEIGHT*hist_d
+                if cost < best_cost:
+                    best_cost = cost
+                    best_idx = i
+            if best_idx >= 0:
+                # match found
+                used.add(best_idx)
+                tr.update(dets[best_idx], crop_and_hist(frame_bgr, dets[best_idx]), now_s)
+                if tr.confirmed and tr.first_confirm_s == now_s:
+                    self.unique_confirmed += 1
+                    self.new_confirmed_this_frame += 1
+            else:
+                tr.mark_missed()
+
+        # Create tracks for unmatched detections
+        for i, d in enumerate(dets):
+            if i in used: continue
+            t = Track(self.next_id, d, crop_and_hist(frame_bgr, d), now_s)
+            self.next_id += 1
+            self.tracks.append(t)
+            if t.confirmed:
+                self.unique_confirmed += 1
+                self.new_confirmed_this_frame += 1
+
+        # Cleanup
+        self.tracks = [t for t in self.tracks if t.misses <= MAX_MISSES]
+
+    def step(self, frame_bgr, person_boxes, now_s):
+        self._match(frame_bgr, person_boxes, now_s)
+
+    def current_confirmed_in_frame(self):
+        # count confirmed tracks that were seen "now" (misses == 0)
+        return sum(1 for t in self.tracks if t.confirmed and t.misses == 0)
+
+    def movement_index(self):
+        mov = []
+        for t in self.tracks:
+            if len(t.centroids) >= 2:
+                dists = [np.linalg.norm(np.array(t.centroids[i])-np.array(t.centroids[i-1])) for i in range(1,len(t.centroids))]
+                if dists:
+                    mov.append(np.mean(dists))
+        return float(np.mean(mov)) if mov else 0.0
+
+    def avg_dwell_time(self):
+        # approximate dwell = number of frames seen for confirmed tracks (hits), scaled by sampling interval
+        confirmed = [t for t in self.tracks if t.confirmed]
+        if not confirmed: return 0.0
+        frames_seen = [t.total_hits for t in confirmed]
+        return float(np.mean(frames_seen))
+
+# ============================================
+# MULTI-FRAME SAMPLER with adaptations
+# ============================================
+def mean_abs_diff(prev_gray, curr_gray):
+    if prev_gray is None or curr_gray is None: return 1.0
+    # resize to stabilize computation
+    target_w = 320
+    scale = target_w / max(1, curr_gray.shape[1])
+    curr_small = cv2.resize(curr_gray, (int(curr_gray.shape[1]*scale), int(curr_gray.shape[0]*scale)))
+    prev_small = cv2.resize(prev_gray, (curr_small.shape[1], curr_small.shape[0]))
+    diff = cv2.absdiff(curr_small, prev_small)
+    return float(np.mean(diff) / 255.0)
+
+def process_video_multiframe(video_path, base_fps_choice="Standard"):
+    """
+    Sampling:
+      - Base cadence: 1 fps (Standard) or 0.5 fps (Slow)
+      - Auto-slow if very static (rolling median < 0.02 for 5s)
+      - Early-stop if no NEW confirmed tracks for >= 2s (guarded to >=2 frames)
+      - Hard cap: 60 frames
+    Returns:
+      crowd_time_series, unique_people, telemetry, representative_frame_path (for Vision)
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open video file for multi-frame processing.")
+    fps_src = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration_s = total_frames / max(1e-6, fps_src)
+
+    if base_fps_choice == "Slow":
+        base_fps = BASE_FPS_SLOW
+    else:
+        base_fps = BASE_FPS_STANDARD
+
+    interval_s = 1.0 / base_fps
+    now_s = 0.0
+    processed = 0
+
+    # Adaptation state
+    motion_scores = []
+    motion_rolling = []
+    static_below_count = 0
+    wake_above_count = 0
+    auto_slow = False
+    auto_slow_engaged_at = None
+    auto_slow_released_at = None
+
+    # Convergence state
+    tracker = Tracker()
+    last_new_confirm_time = None
+    no_new_frames_consec = 0
+    required_no_new_frames = max(2, int(np.ceil(NO_NEW_SEC * base_fps)))
+
+    # Outputs
+    times = []
+    people_in_frame_series = []
+    representative_frame_path = None
+
+    prev_gray = None
+    last_vision_call_time = -1e9  # so first call can happen ASAP after warmup
+
+    while processed < MAX_FRAMES and now_s <= duration_s + 1e-6:
+        # Seek & read
+        target_frame_idx = int(now_s * fps_src)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame_idx)
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        # Convert for motion & faces
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        cv2.GaussianBlur(frame_gray, (5,5), 0, dst=frame_gray)
+
+        # Motion score
+        m = mean_abs_diff(prev_gray, frame_gray)
+        motion_scores.append(m)
+        prev_gray = frame_gray
+
+        # Update rolling median over last ROLL_WINDOW seconds (≈ last N frames at current cadence)
+        window_len = int(max(1, ROLL_WINDOW * (1.0/interval_s)))
+        motion_rolling = motion_scores[-window_len:]
+        roll_med = float(np.median(motion_rolling))
+
+        # Person detection (local, HOG)
+        person_boxes = detect_persons(frame)
+
+        # Tracking
+        tracker.step(frame, person_boxes, now_s)
+        people_now = tracker.current_confirmed_in_frame()
+        times.append(now_s)
+        people_in_frame_series.append(people_now)
+        processed += 1
+
+        # Representative frame for Vision (middle-ish if not set)
+        if representative_frame_path is None and 0.3*duration_s <= now_s <= 0.7*duration_s:
+            tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            cv2.imwrite(tmp_img.name, frame)
+            representative_frame_path = tmp_img.name
+            tmp_img.close()
+
+        # Update "no new" logic
+        if tracker.new_confirmed_this_frame > 0:
+            last_new_confirm_time = now_s
+            no_new_frames_consec = 0
+        else:
+            no_new_frames_consec += 1
+
+        # Adaptive: very static => downshift to 0.5 fps (after warmup 5s)
+        if now_s >= 5.0:
+            if roll_med < STATIC_THRESH:
+                static_below_count += 1
+                wake_above_count = 0
+            elif roll_med > WAKE_THRESH:
+                wake_above_count += 1
+                static_below_count = 0
+
+            if (not auto_slow) and static_below_count >= STATIC_CONSEC_NEED:
+                auto_slow = True
+                auto_slow_engaged_at = now_s
+                interval_s = 1.0 / BASE_FPS_SLOW
+                # Recompute guard for NO_NEW based on slower cadence
+                required_no_new_frames = max(2, int(np.ceil(NO_NEW_SEC * (1.0/interval_s))))
+            elif auto_slow and wake_above_count >= WAKE_CONSEC_NEED:
+                auto_slow = False
+                auto_slow_released_at = now_s
+                interval_s = 1.0 / base_fps
+                required_no_new_frames = max(2, int(np.ceil(NO_NEW_SEC * (1.0/interval_s))))
+
+        # Early-stop: after warmup coverage, if NO new faces for >= 2s (guarded to >=2 frames)
+        if now_s >= MIN_COVERAGE_SEC:
+            if (last_new_confirm_time is None and no_new_frames_consec >= required_no_new_frames) or \
+               (last_new_confirm_time is not None and (now_s - last_new_confirm_time) >= NO_NEW_SEC and no_new_frames_consec >= required_no_new_frames):
+                break
+
+        # Vision mood cadence (every ~4s)
+        # (We keep current per-video Vision calls outside this loop to minimize cost; mood summary uses representative frame.)
+        # If you later want multi-sample mood, gate here with time gap and store temp frames.
+
+        # Advance time
+        now_s += interval_s
+
+    cap.release()
+
+    telemetry = {
+        "processed_frames": processed,
+        "processed_seconds_est": times[-1] if times else 0.0,
+        "auto_slow_engaged_at_s": auto_slow_engaged_at,
+        "auto_slow_released_at_s": auto_slow_released_at,
+        "early_stop_reason": "no_new_faces_2s" if (now_s >= MIN_COVERAGE_SEC and (last_new_confirm_time is None or (now_s - (last_new_confirm_time or 0)) >= NO_NEW_SEC)) else None,
+        "base_mode": base_fps_choice,
+    }
+
+    return {
+        "times": times,
+        "people_in_frame": people_in_frame_series,
+        "unique_people": tracker.unique_confirmed,
+        "movement_index": tracker.movement_index(),
+        "avg_dwell_frames": tracker.avg_dwell_time(),  # presented in frames (we'll convert to sec)
+        "interval_s": interval_s,  # final sampling interval
+        "telemetry": telemetry,
+        "representative_frame_path": representative_frame_path
+    }
+
+# ============================================
+# STORAGE & DB
+# ============================================
 def save_user_rating(venue_id, user_id, rating, venue_name, venue_type):
-    """Persist a user's rating to Supabase (table: user_ratings)."""
     try:
         data = {
             "venue_id": str(venue_id),
@@ -534,7 +864,52 @@ def handle_logout():
     st.toast("Logged out", icon="👋")
 
 # ---------- UI ----------
-def display_results(results):
+def display_people_analytics(pa):
+    st.subheader("👥 People Analytics (multi-frame)")
+    unique_people = pa["unique_people"]
+    people_series = pa["people_in_frame"]
+    times = pa["times"]
+    interval_s = pa["interval_s"]
+    dwell_frames_avg = pa["avg_dwell_frames"]
+    movement_idx = pa["movement_index"]
+    tele = pa["telemetry"]
+
+    # Summary metrics
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Unique People (confirmed)", f"{unique_people}")
+    if people_series:
+        c2.metric("People in Frame (avg)", f"{np.mean(people_series):.1f}")
+        c3.metric("People in Frame (max)", f"{np.max(people_series)}")
+    else:
+        c2.metric("People in Frame (avg)", "0")
+        c3.metric("People in Frame (max)", "0")
+
+    # Dwell & movement
+    c4, c5 = st.columns(2)
+    c4.metric("Avg Dwell (frames @ sample rate)", f"{dwell_frames_avg:.1f}")
+    c5.metric("Movement Index (px/frame)", f"{movement_idx:.1f}")
+
+    # Timeline chart
+    if people_series and times:
+        fig, ax = plt.subplots()
+        ax.plot(times, people_series, marker="o")
+        ax.set_title("People in Frame Over Time")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Count")
+        st.pyplot(fig)
+
+    # Adaptation summary
+    chips = []
+    if tele.get("base_mode"): chips.append(f"Base: {tele['base_mode']}")
+    if tele.get("auto_slow_engaged_at_s") is not None:
+        chips.append(f"Auto-slow engaged @ {tele['auto_slow_engaged_at_s']:.1f}s")
+    if tele.get("auto_slow_released_at_s") is not None:
+        chips.append(f"Auto-slow released @ {tele['auto_slow_released_at_s']:.1f}s")
+    if tele.get("early_stop_reason"):
+        chips.append(f"Early-stop ({tele['early_stop_reason']}) @ {tele['processed_seconds_est']:.1f}s")
+    st.info(" | ".join(chips) if chips else "No adaptive events triggered.")
+
+def display_results(results, people_analytics=None):
     st.subheader(f"📊 Analysis Results for {results['venue_name']}")
     col1, col2 = st.columns(2)
     with col1:
@@ -574,6 +949,9 @@ def display_results(results):
         ax.set_title("Mood Breakdown"); ax.set_xlabel("Confidence"); ax.set_ylabel("")
         st.pyplot(fig)
 
+    if people_analytics:
+        display_people_analytics(people_analytics)
+
 def display_all_results_page():
     st.subheader("Your Uploaded Videos")
     if st.session_state.user:
@@ -608,7 +986,7 @@ def display_all_results_page():
 def main():
     st.markdown('<div class="main-header"><h1>SneakPeak Video Scorer</h1><p>A tool for real-time venue intelligence</p></div>', unsafe_allow_html=True)
 
-    # Show single consolidated health message about MoviePy/ffmpeg
+    # Show consolidated health message about MoviePy/ffmpeg
     if HAS_MOVIEPY:
         st.info(f"MoviePy/ffmpeg is ready. Binary: {FFMPEG_BINARY}")
     else:
@@ -672,6 +1050,10 @@ def main():
                 key="venue_type_input"
             )
 
+            # Processing rate (your spec)
+            rate_choice = st.selectbox("Processing rate", ["Standard (1 fps)", "Slow (0.5 fps)"], index=0)
+            base_choice = "Standard" if rate_choice.startswith("Standard") else "Slow"
+
             # GPS intentionally skipped for now (schema fields kept as None)
             latitude = longitude = accuracy = None
 
@@ -694,23 +1076,36 @@ def main():
                 progress_bar = st.progress(0, text="Initializing analysis...")
 
                 try:
-                    progress_bar.progress(10, text="Extracting video frame...")
-                    temp_image_path = get_single_frame_from_video(temp_video_path)
-                    if not temp_image_path:
-                        st.error("Failed to extract a video frame. Analysis aborted.")
-                        return
+                    # ---- Multi-frame analytics (people counting/tracking) ----
+                    progress_bar.progress(15, text="Sampling frames & counting people...")
+                    pa = process_video_multiframe(temp_video_path, base_fps_choice=base_choice)
 
-                    progress_bar.progress(30, text="Analyzing audio...")
+                    # Use representative frame for Vision analytics (to control cost)
+                    rep_frame = pa["representative_frame_path"]
+                    if not rep_frame:
+                        # Fallback: grab mid-frame if none selected
+                        cap = cv2.VideoCapture(temp_video_path)
+                        mid_idx = int((cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1)//2)
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, mid_idx)
+                        ok, frm = cap.read()
+                        cap.release()
+                        if ok:
+                            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+                            cv2.imwrite(tmp.name, frm)
+                            rep_frame = tmp.name
+                            tmp.close()
+
+                    progress_bar.progress(45, text="Analyzing audio (if available)...")
                     audio_features = extract_audio_features(temp_video_path)
 
-                    progress_bar.progress(50, text="Analyzing visual environment...")
-                    visual_features = analyze_visual_features_with_vision_api(temp_image_path)
+                    progress_bar.progress(65, text="Analyzing visual environment...")
+                    visual_features = analyze_visual_features_with_vision_api(rep_frame) if rep_frame else {}
 
-                    progress_bar.progress(70, text="Analyzing crowd density and activity...")
-                    crowd_features = analyze_crowd_features_with_vision_api(temp_image_path)
+                    progress_bar.progress(80, text="Analyzing crowd density and activity...")
+                    crowd_features = analyze_crowd_features_with_vision_api(rep_frame) if rep_frame else {"crowd_density":"Unknown","activity_level":"Unknown","density_score":0.0}
 
                     progress_bar.progress(90, text="Detecting dominant mood...")
-                    mood_features = analyze_mood_recognition_with_vision_api(temp_image_path)
+                    mood_features = analyze_mood_recognition_with_vision_api(rep_frame) if rep_frame else {"dominant_mood":"Unknown","confidence":0.0,"mood_breakdown":{"Unknown":1.0},"overall_vibe":"Unknown"}
 
                     results = {
                         "venue_name": venue_name,
@@ -737,13 +1132,16 @@ def main():
                             st.session_state.processed_videos.append(saved)
                             st.success("Analysis complete!")
                             st.toast("Analysis complete ✅", icon="✅")
-                            display_results(saved)
+                            display_results(saved, people_analytics=pa)
 
                 except Exception as e:
                     st.error(f"Unexpected error during analysis: {e}")
                 finally:
                     if temp_video_path and os.path.exists(temp_video_path): os.unlink(temp_video_path)
                     if temp_image_path and os.path.exists(temp_image_path): os.unlink(temp_image_path)
+                    if pa and pa.get("representative_frame_path") and os.path.exists(pa["representative_frame_path"]):
+                        try: os.unlink(pa["representative_frame_path"])
+                        except Exception: pass
                     try: progress_bar.empty()
                     except Exception: pass
 
