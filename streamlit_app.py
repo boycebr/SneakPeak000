@@ -13,30 +13,35 @@ import base64
 import uuid
 import streamlit.components.v1 as components
 from supabase import create_client, Client
-import librosa # New import for audio analysis
-import soundfile as sf # New import for audio analysis
+import librosa
+import soundfile as sf
 import io
 from PIL import Image
-import cv2 # Import for video frame processing
-import hmac # Import for ACRCloud signature
-import hashlib # Import for ACRCloud signature
-import time # Import for ACRCloud timestamp
+import cv2
+import hmac
+import hashlib
+import time
 
-# ===============================
-# CONFIGURATION & INITIALIZATION
-# ===============================
+# ============================================
+# CRITICAL: CONFIGURATION & INITIALIZATION
+#
+# WARNING: In a production environment, NEVER
+# hardcode credentials like this. Use environment
+# variables or a secrets management system.
+# ============================================
 
 # --- Supabase configuration ---
+# (Simulated secure access for this environment)
 SUPABASE_URL = "https://tmmheslzkqiveylrnpal.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRtbWhlc2x6a3FpdmV5bHJucGFsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTQzMzI5MjAsImV4cCI6MjA2OTkwODkyMH0.U-10R707xIs6rH-Vd5lBgh2INylFu6zn_EyoJYx_zpI"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- Google Cloud Vision API configuration ---
-# NOTE: In a production app, you should use Streamlit secrets or environment variables
-# to store your API key securely. For this self-contained demo, we'll put it here.
+# WARNING: This key is exposed in the source code.
 GOOGLE_VISION_API_KEY = "AIzaSyCcwH6w-3AglhEUmegXlWOtABZzJ1MrSiQ"
 
 # --- ACRCloud Configuration (for real genre detection) ---
+# WARNING: These keys are exposed in the source code.
 ACRCLOUD_ACCESS_KEY = "b1f7b901a4f15b99aba0efac395f6848"
 ACRCLOUD_SECRET_KEY = "tIVqMBQwOYGkCjkXAyY2wPiM5wxS5UrNwqMwMQjA"
 ACRCLOUD_API_HOST = "identify-eu-west-1.acrcloud.com"
@@ -45,7 +50,7 @@ ACRCLOUD_API_ENDPOINT = "/v1/identify"
 # Page config
 st.set_page_config(
     page_title="SneakPeak Video Scorer",
-    page_icon="🎯",
+    page_icon="�",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -297,6 +302,9 @@ def upload_video_to_supabase(uploaded_file, video_id):
                 st.error(f"Error details: {response.text}")
             return None, None
             
+    except requests.exceptions.RequestException as e:
+        st.error(f"Network error during video upload: {str(e)}")
+        return None, None
     except Exception as e:
         st.error(f"Error uploading video: {str(e)}")
         return None, None
@@ -304,6 +312,7 @@ def upload_video_to_supabase(uploaded_file, video_id):
 def verify_venue_location(latitude, longitude, venue_name):
     """Simple venue verification - in production this would check against venue database"""
     if latitude and longitude:
+        # Simple check for New York City boundaries
         if 40.4774 <= latitude <= 40.9176 and -74.2591 <= longitude <= -73.7004:
             return True
     return False
@@ -333,6 +342,9 @@ def save_user_rating(venue_id, user_id, rating, venue_name, venue_type):
         )
         
         return response.status_code == 201
+    except requests.exceptions.RequestException as e:
+        st.error(f"Network error saving rating: {str(e)}")
+        return False
     except Exception as e:
         st.error(f"Error saving rating: {str(e)}")
         return False
@@ -383,9 +395,6 @@ def save_to_supabase(results, uploaded_file=None):
             "energy_score": max(0.0, min(100.0, float(calculate_energy_score(results))))
         }
         
-        with st.expander("🔍 Debug Info", expanded=False):
-            st.json(db_data)
-        
         headers = {
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -407,11 +416,13 @@ def save_to_supabase(results, uploaded_file=None):
             if response.text:
                 st.error(f"Error details: {response.text}")
             try:
-                error_json = response.json()
-                st.json(error_json)
+                st.json(response.json())
             except:
                 st.write("Raw response:", response.text)
             return False, None
+    except requests.exceptions.RequestException as e:
+        st.error(f"Network error during database save: {str(e)}")
+        return False, None
     except Exception as e:
         st.error(f"❌ Database error: {str(e)}")
         import traceback
@@ -425,7 +436,6 @@ def load_user_results(user_id):
     
     try:
         data = supabase.from_("video_results").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
-        st.write(f"🔍 Debug: Fetched {len(data.data)} videos for user {user_id}.")
         return data.data
     except Exception as e:
         st.error(f"❌ Database error during data load: {str(e)}")
@@ -455,6 +465,9 @@ def load_video_by_id(video_id):
             st.error(f"❌ Failed to load video with ID {video_id}. Status code: {response.status_code}")
             st.error(f"Error details: {response.text}")
             return None
+    except requests.exceptions.RequestException as e:
+        st.error(f"Network error during video load: {str(e)}")
+        return None
     except Exception as e:
         st.error(f"❌ Database error during video load: {str(e)}")
         return None
@@ -484,15 +497,16 @@ def extract_audio_features(video_path):
     temp_audio_path = None
     try:
         video = VideoFileClip(video_path)
-        audio = video.audio
         
-        # Write audio to a temporary file
+        # Limit audio analysis to the first 10 seconds for performance and API limits
+        duration = min(video.duration, 10)
+        audio = video.audio.subclip(0, duration)
+        
         temp_audio_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
         audio.write_audiofile(temp_audio_file.name, verbose=False, logger=None)
         temp_audio_path = temp_audio_file.name
         temp_audio_file.close()
 
-        # Librosa analysis for BPM and volume
         y, sr = librosa.load(temp_audio_path, sr=None)
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
         rms = librosa.feature.rms(y=y)
@@ -508,7 +522,6 @@ def extract_audio_features(video_path):
         timestamp = int(time.time())
         signature = generate_acrcloud_signature(str(timestamp))
 
-        # ACRCloud requires a specific multipart/form-data payload
         payload = {
             'access_key': ACRCLOUD_ACCESS_KEY,
             'timestamp': str(timestamp),
@@ -518,30 +531,35 @@ def extract_audio_features(video_path):
             'sample_bytes': os.path.getsize(temp_audio_path),
         }
         
-        files = {
-            'sample': open(temp_audio_path, 'rb')
-        }
-        
-        acr_response = requests.post(
-            f"http://{ACRCLOUD_API_HOST}{ACRCLOUD_API_ENDPOINT}",
-            data=payload,
-            files=files
-        )
-        
-        acr_results = acr_response.json()
-        genre = "Unknown"
-        
-        if 'status' in acr_results and acr_results['status']['code'] == 0:
-            if 'metadata' in acr_results and 'music' in acr_results['metadata'] and acr_results['metadata']['music']:
-                # Extract the first genre found
-                first_music_match = acr_results['metadata']['music'][0]
-                if 'genres' in first_music_match and first_music_match['genres']:
-                    genre = first_music_match['genres'][0]['name']
-                elif 'external_metadata' in first_music_match and 'spotify' in first_music_match['external_metadata'] and 'genres' in first_music_match['external_metadata']['spotify']:
-                    genre = first_music_match['external_metadata']['spotify']['genres'][0]
-        
-        st.write(f"🔍 ACRCloud API Response: {acr_results}")
+        with open(temp_audio_path, 'rb') as f:
+            files = {'sample': f}
+            
+            try:
+                # IMPORTANT: Changed http to https for security
+                acr_response = requests.post(
+                    f"https://{ACRCLOUD_API_HOST}{ACRCLOUD_API_ENDPOINT}",
+                    data=payload,
+                    files=files,
+                    timeout=15 # Add a timeout to prevent hanging
+                )
+                acr_response.raise_for_status() # Raise HTTPError for bad responses
+                acr_results = acr_response.json()
+            except requests.exceptions.RequestException as e:
+                st.warning(f"ACRCloud API network error: {e}. Falling back to mock genre.")
+                return {
+                    "bpm": int(tempo), "volume_level": float(volume_level),
+                    "genre": "Unknown", "energy_level": energy_level
+                }
 
+        genre = "Unknown"
+        # Validate and parse the API response
+        if acr_results.get('status', {}).get('code') == 0 and acr_results.get('metadata', {}).get('music'):
+            first_music_match = acr_results['metadata']['music'][0]
+            if first_music_match.get('genres') and first_music_match['genres'][0].get('name'):
+                genre = first_music_match['genres'][0]['name']
+            elif first_music_match.get('external_metadata', {}).get('spotify', {}).get('genres'):
+                genre = first_music_match['external_metadata']['spotify']['genres'][0]
+        
         return {
             "bpm": int(tempo),
             "volume_level": float(volume_level),
@@ -558,70 +576,69 @@ def extract_audio_features(video_path):
         if temp_audio_path and os.path.exists(temp_audio_path):
             os.unlink(temp_audio_path)
 
-def get_image_from_video(video_path):
-    """Extract a single frame from the middle of the video as a JPEG image."""
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        st.error("Error: Could not open video file.")
-        return None
-    
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    mid_frame_index = frame_count // 2
-    
-    cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
-    ret, frame = cap.read()
-    
-    cap.release()
-    
-    if not ret:
-        st.error("Error: Could not read frame from video.")
-        return None
-        
-    # Convert frame to JPEG byte buffer
-    is_success, buffer = cv2.imencode(".jpg", frame)
-    if not is_success:
-        st.error("Error: Could not encode frame to JPEG.")
-        return None
-        
-    return buffer.tobytes()
-
-def analyze_visual_features_with_vision_api(video_path):
-    """Analyze visual features using Google Cloud Vision API on a single video frame."""
-    
-    # Extract a frame from the video
-    image_bytes = get_image_from_video(video_path)
-    if not image_bytes:
-        return {}
-    
-    # Prepare the API request payload
-    payload = {
-        "requests": [
-            {
-                "image": {
-                    "content": base64.b64encode(image_bytes).decode('utf-8')
-                },
-                "features": [
-                    {"type": "IMAGE_PROPERTIES"},
-                    {"type": "FACE_DETECTION"},
-                    {"type": "LABEL_DETECTION"}
-                ]
-            }
-        ]
-    }
-    
-    api_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
-    
+def get_single_frame_from_video(video_path):
+    """
+    Extract a single frame from the middle of the video as a JPEG image.
+    This function is called once to avoid redundant frame extraction.
+    """
+    temp_image_path = None
     try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            st.error("Error: Could not open video file.")
+            return None
+        
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        mid_frame_index = frame_count // 2
+        
+        cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret:
+            st.error("Error: Could not read frame from video.")
+            return None
+            
+        temp_image_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+        cv2.imwrite(temp_image_file.name, frame)
+        temp_image_path = temp_image_file.name
+        temp_image_file.close()
+
+        return temp_image_path
+    except Exception as e:
+        st.error(f"Error extracting video frame: {e}")
+        return None
+    
+def analyze_visual_features_with_vision_api(image_path):
+    """Analyze visual features using Google Cloud Vision API on a single video frame."""
+    try:
+        with open(image_path, "rb") as image_file:
+            image_bytes = image_file.read()
+
+        payload = {
+            "requests": [
+                {
+                    "image": {
+                        "content": base64.b64encode(image_bytes).decode('utf-8')
+                    },
+                    "features": [
+                        {"type": "IMAGE_PROPERTIES"},
+                        {"type": "LABEL_DETECTION"}
+                    ]
+                }
+            ]
+        }
+        
+        api_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
+        
         response = requests.post(api_url, json=payload)
-        response.raise_for_status() # Raise an exception for bad status codes
+        response.raise_for_status()
         
         api_results = response.json()
         
-        # Parse the response for visual properties
         image_properties = api_results['responses'][0].get('imagePropertiesAnnotation', {})
         colors = image_properties.get('dominantColors', {}).get('colors', [])
         
-        # Determine dominant color and brightness
         if colors:
             dominant_color = sorted(colors, key=lambda x: x['pixelFraction'], reverse=True)[0]
             brightness_level = dominant_color['color']['blue'] * 0.299 + dominant_color['color']['green'] * 0.587 + dominant_color['color']['red'] * 0.114
@@ -630,19 +647,17 @@ def analyze_visual_features_with_vision_api(video_path):
             brightness_level = np.random.uniform(30, 90)
             color_scheme = "Unknown"
         
-        # Determine visual energy from labels
         labels = api_results['responses'][0].get('labelAnnotations', [])
         visual_energy = "Medium"
-        if any(label['description'] in ["crowd", "party", "dance", "celebration"] for label in labels):
+        if any(label['description'].lower() in ["crowd", "party", "dance", "celebration"] for label in labels):
             visual_energy = "High"
-        elif any(label['description'] in ["quiet", "calm", "indoor", "still"] for label in labels):
+        elif any(label['description'].lower() in ["quiet", "calm", "indoor", "still"] for label in labels):
             visual_energy = "Low"
             
-        # Determine lighting type
         lighting_type = "Mixed Indoor"
-        if "indoor" in [l['description'] for l in labels] and brightness_level < 100:
+        if "indoor" in [l['description'].lower() for l in labels] and brightness_level < 100:
             lighting_type = "Dark/Club Lighting"
-        elif "outdoor" in [l['description'] for l in labels] or brightness_level > 150:
+        elif "outdoor" in [l['description'].lower() for l in labels] or brightness_level > 150:
             lighting_type = "Bright/Bar Lighting"
             
         return {
@@ -659,31 +674,27 @@ def analyze_visual_features_with_vision_api(video_path):
         st.error(f"Error analyzing visual features: {e}")
         return {}
 
-def analyze_crowd_features_with_vision_api(video_path):
+def analyze_crowd_features_with_vision_api(image_path):
     """Analyze crowd features using Google Cloud Vision API on a single video frame."""
-
-    # Extract a frame from the video
-    image_bytes = get_image_from_video(video_path)
-    if not image_bytes:
-        return {}
-
-    # Prepare the API request payload
-    payload = {
-        "requests": [
-            {
-                "image": {
-                    "content": base64.b64encode(image_bytes).decode('utf-8')
-                },
-                "features": [
-                    {"type": "FACE_DETECTION"}
-                ]
-            }
-        ]
-    }
-    
-    api_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
-
     try:
+        with open(image_path, "rb") as image_file:
+            image_bytes = image_file.read()
+
+        payload = {
+            "requests": [
+                {
+                    "image": {
+                        "content": base64.b64encode(image_bytes).decode('utf-8')
+                    },
+                    "features": [
+                        {"type": "FACE_DETECTION"}
+                    ]
+                }
+            ]
+        }
+        
+        api_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
+
         response = requests.post(api_url, json=payload)
         response.raise_for_status()
         api_results = response.json()
@@ -691,7 +702,6 @@ def analyze_crowd_features_with_vision_api(video_path):
         faces = api_results['responses'][0].get('faceAnnotations', [])
         num_faces = len(faces)
         
-        # Determine crowd density based on the number of faces detected
         if num_faces == 0:
             crowd_density = "Empty"
         elif num_faces <= 2:
@@ -703,14 +713,12 @@ def analyze_crowd_features_with_vision_api(video_path):
         else:
             crowd_density = "Packed"
             
-        # Determine activity level based on face emotions
         activity_level = "Still/Seated"
         if any(f['joyLikelihood'] == 'VERY_LIKELY' or f['sorrowLikelihood'] == 'VERY_LIKELY' for f in faces):
             activity_level = "High Movement/Dancing"
         elif any(f['joyLikelihood'] == 'LIKELY' for f in faces):
             activity_level = "Social/Standing"
             
-        # Determine a density score
         density_score = num_faces * 1.5 + np.random.uniform(0, 5)
 
         return {
@@ -726,28 +734,26 @@ def analyze_crowd_features_with_vision_api(video_path):
         st.error(f"Error analyzing crowd features: {e}")
         return {}
 
-def analyze_mood_recognition_with_vision_api(video_path):
+def analyze_mood_recognition_with_vision_api(image_path):
     """Analyze mood recognition using Google Cloud Vision API."""
-    
-    image_bytes = get_image_from_video(video_path)
-    if not image_bytes:
-        return {}
-
-    payload = {
-        "requests": [
-            {
-                "image": {
-                    "content": base64.b64encode(image_bytes).decode('utf-8')
-                },
-                "features": [
-                    {"type": "FACE_DETECTION"}
-                ]
-            }
-        ]
-    }
-    api_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
-
     try:
+        with open(image_path, "rb") as image_file:
+            image_bytes = image_file.read()
+        
+        payload = {
+            "requests": [
+                {
+                    "image": {
+                        "content": base64.b64encode(image_bytes).decode('utf-8')
+                    },
+                    "features": [
+                        {"type": "FACE_DETECTION"}
+                    ]
+                }
+            ]
+        }
+        api_url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_VISION_API_KEY}"
+
         response = requests.post(api_url, json=payload)
         response.raise_for_status()
         api_results = response.json()
@@ -755,7 +761,6 @@ def analyze_mood_recognition_with_vision_api(video_path):
         faces = api_results['responses'][0].get('faceAnnotations', [])
         
         if not faces:
-            # If no faces are found, use a neutral fallback
             return {
                 "dominant_mood": "Calm",
                 "confidence": 0.5,
@@ -763,7 +768,6 @@ def analyze_mood_recognition_with_vision_api(video_path):
                 "overall_vibe": "Neutral"
             }
             
-        # Aggregate mood from all detected faces
         mood_counts = {
             "joy": 0, "sorrow": 0, "anger": 0, "surprise": 0, "undetermined": 0
         }
@@ -773,7 +777,6 @@ def analyze_mood_recognition_with_vision_api(video_path):
             anger = face.get('angerLikelihood', 'UNDETERMINED')
             surprise = face.get('surpriseLikelihood', 'UNDETERMINED')
             
-            # Map likelihoods to a count
             if joy == "VERY_LIKELY": mood_counts["joy"] += 3
             elif joy == "LIKELY": mood_counts["joy"] += 2
             elif joy == "POSSIBLE": mood_counts["joy"] += 1
@@ -790,27 +793,23 @@ def analyze_mood_recognition_with_vision_api(video_path):
             elif surprise == "LIKELY": mood_counts["surprise"] += 2
             elif surprise == "POSSIBLE": mood_counts["surprise"] += 1
             
-        # Determine dominant mood
         if sum(mood_counts.values()) == 0:
              dominant_mood_key = "undetermined"
         else:
             dominant_mood_key = max(mood_counts, key=mood_counts.get)
         
-        # Map Google's moods to SneakPeak's moods
         mood_map = {
             "joy": "Happy",
-            "sorrow": "Calm", # Sorrow can be low-energy, mapping to Calm
-            "anger": "Energetic", # Anger is high energy, mapping to Energetic
+            "sorrow": "Calm",
+            "anger": "Energetic",
             "surprise": "Excited",
-            "undetermined": "Social" # Undetermined can be a mix of subtle emotions
+            "undetermined": "Social"
         }
         dominant_mood = mood_map.get(dominant_mood_key, "Social")
         
-        # Calculate confidence as a ratio of the dominant mood count to the total
         total_mood_score = sum(mood_counts.values())
         confidence = mood_counts.get(dominant_mood_key, 0) / (total_mood_score or 1)
         
-        # Calculate overall vibe
         overall_vibe = "Positive"
         if "Calm" in dominant_mood or dominant_mood_key == "sorrow":
             overall_vibe = "Mixed"
@@ -993,58 +992,100 @@ def main():
                     st.info("Click 'Get Current Location' to fetch GPS coordinates.")
                     latitude, longitude, accuracy = None, None, None
 
-                uploaded_file = st.file_uploader("Choose a video file...", type=['mp4', 'mov', 'avi'])
+                uploaded_file = st.file_uploader("Choose a video file (max 200MB)...", type=['mp4', 'mov', 'avi'])
                 submitted = st.form_submit_button("Start Analysis")
                 
                 if submitted:
                     if uploaded_file:
+                        file_size_mb = uploaded_file.size / (1024 * 1024)
+                        if file_size_mb > 200:
+                            st.error("File size exceeds 200MB limit. Please upload a smaller video.")
+                            return
+
                         if latitude is None or longitude is None:
                             st.error("Please get your GPS location before starting the analysis.")
-                        elif not st.session_state.user:
+                            return
+                        
+                        if not st.session_state.user:
                             st.error("Please log in to upload a video.")
-                        else:
-                            with st.spinner("Analyzing video..."):
-                                tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-                                tfile.write(uploaded_file.getvalue())
-                                temp_path = tfile.name
-                                tfile.close()
+                            return
+                        
+                        # Use a single temporary file to avoid redundant memory usage
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tfile:
+                            tfile.write(uploaded_file.getvalue())
+                            temp_video_path = tfile.name
+                        
+                        # Use a single temporary image file to avoid redundant frame extractions
+                        temp_image_path = None
+                        
+                        try:
+                            # --- Performance & Progress Indicators ---
+                            progress_bar = st.progress(0, text="Initializing analysis...")
+                            
+                            # Step 1: Extract a single frame for all visual analysis
+                            progress_bar.progress(10, text="Extracting video frame...")
+                            temp_image_path = get_single_frame_from_video(temp_video_path)
+                            if not temp_image_path:
+                                st.error("Failed to extract a video frame. Analysis aborted.")
+                                return
+                            
+                            # Step 2: Audio Analysis
+                            progress_bar.progress(30, text="Analyzing audio with ACRCloud...")
+                            audio_features = extract_audio_features(temp_video_path)
+                            
+                            # Step 3: Visual Analysis (re-using the single frame)
+                            progress_bar.progress(50, text="Analyzing visual environment...")
+                            visual_features = analyze_visual_features_with_vision_api(temp_image_path)
+                            
+                            # Step 4: Crowd Analysis (re-using the single frame)
+                            progress_bar.progress(70, text="Analyzing crowd density and activity...")
+                            crowd_features = analyze_crowd_features_with_vision_api(temp_image_path)
+                            
+                            # Step 5: Mood Recognition (re-using the single frame)
+                            progress_bar.progress(90, text="Detecting dominant mood...")
+                            mood_features = analyze_mood_recognition_with_vision_api(temp_image_path)
+                            
+                            is_verified = verify_venue_location(latitude, longitude, venue_name)
 
-                                audio_features = extract_audio_features(temp_path)
-                                
-                                # Use the real API-driven analysis functions
-                                visual_features = analyze_visual_features_with_vision_api(temp_path)
-                                crowd_features = analyze_crowd_features_with_vision_api(temp_path)
-                                mood_features = analyze_mood_recognition_with_vision_api(temp_path)
-                                
-                                is_verified = verify_venue_location(latitude, longitude, venue_name)
-
-                                results = {
-                                    "venue_name": venue_name,
-                                    "venue_type": venue_type,
-                                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                    "gps_data": {
-                                        "latitude": latitude,
-                                        "longitude": longitude,
-                                        "accuracy": accuracy,
-                                        "venue_verified": is_verified
-                                    },
-                                    "audio_environment": audio_features,
-                                    "visual_environment": visual_features,
-                                    "crowd_density": crowd_features,
-                                    "mood_recognition": mood_features
-                                }
-                                
-                                results["energy_score"] = calculate_energy_score(results)
-                                
-                                success, video_id = save_to_supabase(results, uploaded_file)
-                                if success:
-                                    st.success(f"Video saved with ID: {video_id}")
-                                    saved_video_data = load_video_by_id(video_id)
-                                    if saved_video_data:
-                                        st.session_state.processed_videos.append(saved_video_data)
-                                        display_results(saved_video_data)
-                                    
-                                os.unlink(temp_path)
+                            results = {
+                                "venue_name": venue_name,
+                                "venue_type": venue_type,
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "gps_data": {
+                                    "latitude": latitude,
+                                    "longitude": longitude,
+                                    "accuracy": accuracy,
+                                    "venue_verified": is_verified
+                                },
+                                "audio_environment": audio_features,
+                                "visual_environment": visual_features,
+                                "crowd_density": crowd_features,
+                                "mood_recognition": mood_features
+                            }
+                            
+                            results["energy_score"] = calculate_energy_score(results)
+                            
+                            # Step 6: Save to Supabase
+                            progress_bar.progress(100, text="Saving results to database...")
+                            success, video_id = save_to_supabase(results, uploaded_file)
+                            
+                            if success:
+                                saved_video_data = load_video_by_id(video_id)
+                                if saved_video_data:
+                                    st.session_state.processed_videos.append(saved_video_data)
+                                    st.success("Analysis complete!")
+                                    display_results(saved_video_data)
+                            
+                        except Exception as e:
+                            st.error(f"An unexpected error occurred during analysis: {e}")
+                            
+                        finally:
+                            # --- Critical: Temporary file cleanup ---
+                            if temp_video_path and os.path.exists(temp_video_path):
+                                os.unlink(temp_video_path)
+                            if temp_image_path and os.path.exists(temp_image_path):
+                                os.unlink(temp_image_path)
+                            progress_bar.empty()
                     else:
                         st.error("Please upload a video file to proceed with the analysis.")
     
@@ -1053,3 +1094,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+�
