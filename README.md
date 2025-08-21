@@ -1,19 +1,22 @@
-# 🎈 Blank app template
+# 🎬 SneakPeak App  
 
-A simple Streamlit app template for you to modify!
+SneakPeak is a Streamlit-based app that lets users securely sign up, log in, and analyze media using AI and Google Vision.  
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://your-deployed-app-link-here)  
 
-### How to run it on your own machine
+---
 
-1. Install the requirements
+## 🚀 Features  
+- 🔐 Secure user authentication (via Supabase)  
+- 📧 Email confirmation required before first login (check your inbox after signing up!)  
+- 📍 Geolocation support to fetch and display your current location  
+- 🖼️ Upload and process images, video, and audio  
+- 🤖 AI-powered analysis using Google Vision and media libraries  
 
-   ```
-   $ pip install -r requirements.txt
-   ```
+---
 
-2. Run the app
+## 🛠️ How to run it locally  
 
-   ```
-   $ streamlit run streamlit_app.py
-   ```
+1. **Install the requirements**  
+   ```bash
+   pip install -r requirements.txt
