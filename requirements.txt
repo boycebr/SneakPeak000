@@ -13,4 +13,3 @@ imageio>=2.34
 imageio-ffmpeg>=0.4.9
 seaborn>=0.13.0
 supabase>=2.3.0
-streamlit-geolocation==0.0.10
