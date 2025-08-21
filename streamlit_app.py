@@ -24,10 +24,13 @@ try:
 except Exception:
     HAS_SEABORN = False
 
+# MoviePy guard: app still runs if video toolchain is missing
 try:
     from moviepy.editor import VideoFileClip
+    HAS_MOVIEPY = True
 except Exception:
-    VideoFileClip = None  # app still runs without full video toolchain
+    VideoFileClip = None
+    HAS_MOVIEPY = False
 
 from supabase import create_client, Client
 import librosa
@@ -37,8 +40,7 @@ import cv2
 from streamlit_geolocation import geolocation
 
 # ============================================
-# CONFIG & INITIALIZATION
-# (Use Streamlit Secrets when available)
+# CONFIG & INITIALIZATION (uses Streamlit Secrets when available)
 # ============================================
 
 SUPABASE_URL = st.secrets.get(
@@ -126,7 +128,7 @@ if 'show_confirm_notice' not in st.session_state:
 if 'last_signup_email' not in st.session_state:
     st.session_state.last_signup_email = None
 
-# --- Restore Supabase session if available ---
+# Restore Supabase session if available
 try:
     sb_session = supabase.auth.get_session()
     if sb_session and getattr(sb_session, "user", None) and not st.session_state.user:
@@ -203,7 +205,7 @@ def extract_audio_features(video_path):
     Extract audio features. If MoviePy isn't usable, fall back to defaults to keep the app running.
     """
     if not VideoFileClip:
-        st.warning("Video processing not available (moviepy/ffmpeg missing). Using default audio features.")
+        st.warning("Video processing not available (MoviePy/ffmpeg missing). Using default audio features.")
         return {"bpm": 0, "volume_level": 0.0, "genre": "Unknown", "energy_level": "Unknown"}
 
     temp_audio_path = None
@@ -725,6 +727,14 @@ def display_all_results_page():
 def main():
     st.markdown('<div class="main-header"><h1>SneakPeak Video Scorer</h1><p>A tool for real-time venue intelligence</p></div>', unsafe_allow_html=True)
 
+    # Health banner for video toolchain
+    if not HAS_MOVIEPY:
+        st.warning(
+            "Video processing backend (MoviePy/ffmpeg) isn’t available. "
+            "Uploads will still work, but audio analysis will be limited. "
+            "Ensure `moviepy` and `imageio-ffmpeg` are installed, then redeploy."
+        )
+
     # If we just signed up, show a prominent banner + help
     if st.session_state.show_confirm_notice:
         st.warning("Finish setting up your account: **check your email and click the confirmation link** to activate your login.")
@@ -732,14 +742,12 @@ def main():
             st.markdown("""
 - If the link doesn't open, copy the URL from the email and paste it directly into your browser.
 - If you see “**this site can't be reached**,” the project’s Auth redirect URL may be misconfigured.
-  - In Supabase Dashboard → **Authentication → URL Configuration**, set **Site URL** (and **Redirect URLs**, if used) to your app’s deployed URL.
+  - In Supabase Dashboard → **Authentication → URL Configuration**, set **Site URL** (and **Redirect URLs**, if used) to your app’s deployed URL (or `http://localhost:8501` for local testing).
 - You can also try sending the email again with the button below.
             """)
-        # Best-effort resend button
         if st.session_state.last_signup_email:
             if st.button("Resend confirmation email"):
                 try:
-                    # Some SDKs expose `resend` for signup confirmation; this may be a no-op on certain setups.
                     supabase.auth.resend({"type": "signup", "email": st.session_state.last_signup_email})
                     st.success("Confirmation email re-sent. Please check your inbox.")
                     st.toast("Confirmation email sent ✉️", icon="✉️")
