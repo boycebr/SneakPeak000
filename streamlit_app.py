@@ -9,7 +9,7 @@ from typing import Tuple, Optional, Dict, Any
 import numpy as np
 from PIL import Image
 
-import imageio_ffmpeg, os
+import imageio_ffmpeg
 os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
 
 import streamlit as st
