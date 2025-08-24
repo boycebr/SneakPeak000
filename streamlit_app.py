@@ -647,3 +647,500 @@ ALLOWED_VENUES = ["Club","Bar","Restaurant","Lounge","Rooftop","Outdoors Space",
 def get_venue_type_options(user_id: str) -> list:
     try:
         resp = supabase.table("video_results") \
+            .select("venue_type, count:venue_type") \
+            .eq("user_id", user_id) \
+            .group("venue_type") \
+            .execute()
+        counts = {row["venue_type"]: row["count"] for row in (resp.data or []) if row.get("venue_type")}
+    except Exception:
+        counts = {}
+    present = [v for v in ALLOWED_VENUES if v in counts]
+    present.sort(key=lambda v: counts.get(v, 0), reverse=True)
+    missing = [v for v in ALLOWED_VENUES if v not in present]
+    return present + missing
+
+# ---------------------------------------
+# Storage upload (original+proxy) and DB insert (atomic)
+# ---------------------------------------
+def upload_video_to_storage(uploaded_file, user_id: str, content_hash: str) -> tuple[Optional[dict], Optional[str]]:
+    """
+    Upload original and 480p proxy. Returns (urls, storage_base) or (None, None) on failure.
+    urls: {"original_url","proxy_url"}
+    storage_base: f"{user_id}/{content_hash}"
+    """
+    if not supabase or not st.session_state.user:
+        st.error("Not authenticated; please log in.")
+        return None, None
+    try:
+        data = uploaded_file.getvalue()
+        if not data:
+            st.error("Empty file.")
+            return None, None
+
+        # 480p proxy (auto-trim to 60s)
+        proxy_path, trimmed_seconds = make_480p_proxy(data, max_seconds=60)
+
+        ext = (uploaded_file.name.split(".")[-1] or "mp4").lower()
+        base = f"{user_id}/{content_hash}"
+        orig_key = f"{base}.mp4" if ext == "mp4" else f"{base}.{ext}"
+        proxy_key = f"{base}_480p.mp4"
+
+        # Upload original
+        supabase.storage.from_("videos").upload(
+            path=orig_key,
+            file=data,
+            file_options={"content-type": uploaded_file.type or "video/mp4", "x-upsert": "false"}
+        )
+        # Upload proxy
+        with open(proxy_path, "rb") as pf:
+            supabase.storage.from_("videos").upload(
+                path=proxy_key,
+                file=pf.read(),
+                file_options={"content-type": "video/mp4", "x-upsert": "true"}
+            )
+
+        base_public = f"{SUPABASE_URL}/storage/v1/object/public/videos/"
+        urls = {
+            "original_url": base_public + orig_key,
+            "proxy_url":    base_public + proxy_key,
+        }
+        return urls, base
+    except Exception as e:
+        st.error(f"Upload failed: {e}")
+        return None, None
+
+def save_results_row(results: dict, uploaded_file=None, content_hash: Optional[str] = None):
+    """
+    Inserts into video_results ONLY after storage upload succeeds.
+    Adds: storage_path, public_url (proxy), content_hash, brightness_pct, dominant_color_name, mood_note.
+    UPDATED: Now includes all 19 demographic columns.
+    """
+    if not supabase or not st.session_state.user:
+        st.error("Not authenticated.")
+        return False, None, None
+
+    user_id = st.session_state.user.id
+
+    # idempotency
+    if content_hash:
+        try:
+            existing = supabase.table("video_results").select("*").eq("user_id", user_id).eq("content_hash", content_hash).limit(1).execute()
+            if existing.data:
+                return True, existing.data[0], existing.data[0].get("public_url")
+        except Exception:
+            pass
+
+    if uploaded_file is None:
+        st.error("Missing file for upload.")
+        return False, None, None
+
+    urls, storage_base = upload_video_to_storage(uploaded_file, user_id, content_hash or uuid.uuid4().hex)
+    if not urls:
+        return False, None, None
+
+    venv = results.get("visual_environment", {})
+    aenv = results.get("audio_environment", {})
+    crowd = results.get("crowd_density", {})
+    mood  = results.get("mood_recognition", {})
+    demographics = results.get("demographics", {})  # NEW: Demographics data
+
+    brightness = float(venv.get("brightness_level", 0.0))
+    b_label, b_pct = brightness_label_and_pct(brightness)
+
+    dc_name = None
+    rgb = venv.get("dominant_rgb")
+    if isinstance(rgb, dict) and {"r","g","b"} <= set(rgb):
+        dc_name = rcw_color_name_from_rgb(int(rgb["r"]), int(rgb["g"]), int(rgb["b"]))
+    else:
+        hexcode = str(venv.get("color_scheme","")).strip()
+        if hexcode.startswith("#") and len(hexcode) == 7:
+            try:
+                r = int(hexcode[1:3], 16); g = int(hexcode[3:5], 16); b = int(hexcode[5:7], 16)
+                dc_name = rcw_color_name_from_rgb(r,g,b)
+            except Exception:
+                pass
+    if not dc_name:
+        dc_name = "Gray"
+
+    mood_conf = float(mood.get("confidence", 0.0))
+    faces_detected = int(mood.get("faces_detected", 0))
+    mood_note = None
+    if faces_detected > 0 and mood_conf == 0.0:
+        mood_note = "Faces detected; emotion unclear"
+
+    row = {
+        "user_id": user_id,
+        "created_at": datetime.utcnow().isoformat()+"Z",
+        "venue_name": str(results.get("venue_name",""))[:100],
+        "venue_type": str(results.get("venue_type","Other"))[:50],
+        "storage_path": f"videos/{storage_base}",
+        "public_url": urls["proxy_url"],      # proxy for playback
+        "video_url": urls["proxy_url"],       # keep legacy field working
+        "video_stored": True,
+        "content_hash": content_hash or "",
+        
+        # audio
+        "bpm": int(aenv.get("bpm", 0) or 0),
+        "volume_level": float(aenv.get("volume_level", 0.0) or 0.0),
+        "genre": str(aenv.get("genre","Unknown"))[:50],
+        "energy_level": str(aenv.get("energy_level","Unknown"))[:20],
+        
+        # visual
+        "brightness_level": brightness,
+        "brightness_pct": b_pct,
+        "brightness_label": b_label,
+        "lighting_type": str(venv.get("lighting_type","Unknown"))[:50],
+        "color_scheme": str(venv.get("color_scheme",""))[:50],
+        "dominant_color_name": dc_name,
+        "visual_energy": str(venv.get("visual_energy","Unknown"))[:20],
+        
+        # crowd & mood
+        "crowd_density": str(crowd.get("crowd_density","Unknown"))[:20],
+        "activity_level": str(crowd.get("activity_level","Unknown"))[:50],
+        "density_score": float(crowd.get("density_score", 0.0) or 0.0),
+        "dominant_mood": str(mood.get("dominant_mood","Unknown"))[:30],
+        "mood_confidence": mood_conf,
+        "mood_note": mood_note,
+        
+        # overall
+        "overall_vibe": str(mood.get("overall_vibe","Unknown"))[:30],
+        "energy_score": float(results.get("energy_score", 0.0) or 0.0),
+        
+        # NEW: Demographics columns (all 19 fields)
+        "face_count": int(demographics.get("total_faces", 0)),
+        "gender_male_count": int(demographics.get("male_count", 0)),
+        "gender_female_count": int(demographics.get("female_count", 0)),
+        "gender_male_percentage": float(demographics.get("male_percentage", 0.0)),
+        "gender_female_percentage": float(demographics.get("female_percentage", 0.0)),
+        "gender_confidence": float(demographics.get("confidence", 0.0)),
+        "age_analysis": str(demographics.get("age_analysis", ""))[:100],
+        "demographics_raw": demographics,  # Store full data as JSONB
+        
+        "age_male_analysis": str(demographics.get("male_age_analysis", ""))[:100],
+        "age_female_analysis": str(demographics.get("female_age_analysis", ""))[:100],
+        "age_male_average": demographics.get("age_male_average"),
+        "age_female_average": demographics.get("age_female_average"),
+        "age_male_range": str(demographics.get("age_male_range", "") or "")[:20],
+        "age_female_range": str(demographics.get("age_female_range", "") or "")[:20],
+        
+        "gender_male_confidence": float(demographics.get("gender_male_confidence", 0.0)),
+        "gender_female_confidence": float(demographics.get("gender_female_confidence", 0.0)),
+        "age_male_confidence": float(demographics.get("age_male_confidence", 0.0)),
+        "age_female_confidence": float(demographics.get("age_female_confidence", 0.0)),
+        "overall_analysis_confidence": float(demographics.get("overall_analysis_confidence", 0.0)),
+    }
+
+    try:
+        resp = supabase.table("video_results").insert(row).select("*").execute()
+        inserted = resp.data[0] if resp.data else None
+        return True, inserted, urls["proxy_url"]
+    except Exception as e:
+        st.error(f"DB insert failed: {e}")
+        return False, None, None
+
+# ---------------------------------------
+# UI: rendering results
+# ---------------------------------------
+def display_results(row: dict):
+    st.subheader(f"📊 Analysis Results for {row.get('venue_name','Unknown')}")
+    
+    # Overall metrics
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Overall Vibe", row.get("overall_vibe","N/A"))
+    try:
+        c2.metric("Energy Score", f"{float(row.get('energy_score',0)):.2f}/100")
+    except Exception:
+        c2.metric("Energy Score", str(row.get('energy_score',"N/A")))
+    
+    # NEW: Demographics summary
+    face_count = row.get('face_count', 0)
+    c3.metric("People Detected", face_count)
+
+    # NEW: Demographics Analysis Section
+    demographics_raw = row.get('demographics_raw', {})
+    if demographics_raw and face_count > 0:
+        with st.expander("👥 Demographics Analysis", expanded=True):
+            # Check if this is mock data
+            is_mock = demographics_raw.get('is_mock_data', False)
+            analysis_method = demographics_raw.get('analysis_method', 'Unknown')
+            confidence_level = demographics_raw.get('confidence_level', 'Unknown')
+            
+            if is_mock:
+                st.warning("⚠️ **Mock Data Warning**: Demographic analysis systems were unavailable. Data shown is simulated for demonstration purposes.")
+            else:
+                st.info(f"✅ **Analysis Method**: {analysis_method} | **Confidence**: {confidence_level}")
+            
+            # Gender breakdown
+            male_count = row.get('gender_male_count', 0)
+            female_count = row.get('gender_female_count', 0)
+            male_pct = row.get('gender_male_percentage', 0.0)
+            female_pct = row.get('gender_female_percentage', 0.0)
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Male", f"{male_count} ({male_pct:.1f}%)")
+            col2.metric("Female", f"{female_count} ({female_pct:.1f}%)")
+            
+            gender_conf = row.get('gender_confidence', 0.0)
+            col3.metric("Gender Confidence", f"{gender_conf:.1%}")
+            
+            # Age analysis
+            age_analysis = row.get('age_analysis', 'No age data')
+            st.write(f"**Overall Age Distribution**: {age_analysis}")
+            
+            # Detailed age breakdown if available
+            male_age_analysis = row.get('age_male_analysis')
+            female_age_analysis = row.get('age_female_analysis')
+            
+            if male_age_analysis and female_age_analysis:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**Male Ages**: {male_age_analysis}")
+                    male_avg = row.get('age_male_average')
+                    if male_avg:
+                        st.write(f"Average: {male_avg:.1f} years")
+                
+                with col2:
+                    st.write(f"**Female Ages**: {female_age_analysis}")
+                    female_avg = row.get('age_female_average')
+                    if female_avg:
+                        st.write(f"Average: {female_avg:.1f} years")
+
+    with st.expander("🎵 Audio Environment", expanded=False):
+        bpm = row.get('bpm','N/A')
+        vol = float(row.get('volume_level', 0.0) or 0.0)
+        genre = row.get('genre','Unknown')
+        energy = row.get('energy_level','Unknown')
+        st.write(f"**BPM:** {bpm}  |  **Volume:** {vol:.2f}  |  **Genre:** {genre}  |  **Energy:** {energy}")
+
+    with st.expander("💡 Visual Environment", expanded=True):
+        b = float(row.get('brightness_level', 0.0) or 0.0)
+        b_label, b_pct = brightness_label_and_pct(b)
+        dc_name = row.get("dominant_color_name", "Gray")
+        v_energy = row.get('visual_energy','Unknown')
+        st.write(f"**Brightness:** {b_label} • {b_pct:.2f}%")
+        st.write(f"**Color:** {dc_name}")
+        st.write(f"**Visual Energy:** {v_energy}")
+
+    with st.expander("🕺 Crowd & Mood", expanded=True):
+        cdens = row.get('crowd_density','Unknown')
+        act = row.get('activity_level','Unknown')
+        mood = row.get('dominant_mood','Unknown')
+        conf = float(row.get('mood_confidence',0.0) or 0.0)
+        conf_text = confidence_bucket(conf)
+        extra = row.get("mood_note")
+        st.write(f"**Crowd Density:** {cdens}  |  **Activity:** {act}")
+        st.write(f"**Dominant Mood:** {mood}  |  **Confidence:** {conf_text} ({conf:.0%})")
+        if extra:
+            st.caption(extra)
+
+    url = row.get("public_url") or row.get("video_url")
+    if url:
+        st.video(url)
+
+# ---------------------------------------
+# App UI
+# ---------------------------------------
+st.set_page_config(page_title="SneakPeak Video Scorer", page_icon="🎥", layout="wide")
+st.title("SneakPeak Video Scorer")
+
+with st.sidebar:
+    st.markdown("### Account")
+    if st.session_state.user:
+        st.success(f"Authed client: True\n\n{st.session_state.user.email}")
+        if st.button("Sign out"):
+            sign_out()
+            st.rerun()
+    else:
+        st.info("Authed client: False")
+        with st.form("login"):
+            email = st.text_input("Email")
+            pw = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Sign in")
+        if submit:
+            sign_in(email, pw)
+            st.experimental_rerun()
+
+    st.markdown("---")
+    st.markdown("### System Status")
+    
+    # NEW: Show analysis system availability
+    if INSIGHTFACE_OK:
+        st.success("✅ InsightFace: Ready")
+    else:
+        st.error("❌ InsightFace: Not Available")
+    
+    if AWS_REKOGNITION_OK:
+        st.success("✅ AWS Rekognition: Ready")
+    else:
+        st.error("❌ AWS Rekognition: Not Available")
+    
+    if MOVIEPY_OK:
+        st.success("✅ Video Processing: Ready")
+    else:
+        st.error("❌ Video Processing: Not Available")
+
+    st.markdown("---")
+    st.markdown("### Observability (session)")
+    met = st.session_state.get("metrics", {})
+    st.write(met)
+    if met.get("analysis_ms"):
+        st.caption(f"Avg analysis time: {sum(met['analysis_ms'])/len(met['analysis_ms']):.0f} ms")
+    if st.checkbox("Show raw event log"):
+        st.json(st.session_state.get("event_log", []))
+
+# Tabs
+tab_analyze, tab_history = st.tabs(["Analyze a Video", "View My Videos"])
+
+# -------- Analyze Tab --------
+with tab_analyze:
+    st.subheader("Upload & Analyze")
+    if not st.session_state.user:
+        st.warning("Please sign in to analyze.")
+    up = st.file_uploader("Choose a video (<= 60s recommended; longer will be auto-trimmed for analysis)", type=["mp4","mov","m4v","avi"])
+    venue_name = st.text_input("Venue Name", "")
+    if st.session_state.user:
+        opts = get_venue_type_options(st.session_state.user.id)
+    else:
+        opts = ALLOWED_VENUES
+    venue_type = st.selectbox("Venue Type", opts, index=0)
+
+    disabled = not (up and st.session_state.user)
+    if st.button("Start Analysis", disabled=disabled):
+        if not up:
+            st.error("Please choose a video file.")
+            st.stop()
+        if not st.session_state.user:
+            st.error("Please log in.")
+            st.stop()
+
+        cid = uuid.uuid4().hex
+        data = up.getvalue() or b""
+        if not data:
+            st.error("Empty file.")
+            st.stop()
+
+        log_event("start", cid, filename=up.name, size=len(data))
+
+        # Idempotency check
+        chash = sha256_bytes(data)
+        try:
+            dup = supabase.table("video_results").select("id").eq("user_id", st.session_state.user.id).eq("content_hash", chash).limit(1).execute()
+            if dup.data:
+                st.info("This video was analyzed before. Showing existing result.")
+                row = supabase.table("video_results").select("*").eq("id", dup.data[0]["id"]).single().execute().data
+                display_results(row)
+                st.stop()
+        except Exception:
+            pass
+
+        # Proxy pre-check (auto-trim + resize) to validate ffmpeg availability early
+        try:
+            _proxy_path, _dur = make_480p_proxy(data, max_seconds=60)
+        except Exception as e:
+            st.error(f"Could not prepare analysis proxy: {e}")
+            log_event("analysis_failed", cid, reason="proxy_error")
+            st.stop()
+
+        prog = st.progress(5, text="Analyzing…")
+        t0 = time.time()
+
+        # Save temp original for analyzers
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as t:
+            t.write(data); t.flush(); local_video_path = t.name
+
+        # Audio Analysis
+        audio = extract_audio_features(local_video_path) or {}
+        prog.progress(20, text="Analyzing audio…")
+
+        # Visual Analysis (legacy single frame approach)
+        mid_frame_path = grab_middle_frame(local_video_path)
+        visual = vision_visual(mid_frame_path) or {}
+        crowd  = vision_crowd(mid_frame_path) or {}
+        mood   = vision_mood(mid_frame_path) or {}
+        prog.progress(40, text="Analyzing visuals & mood…")
+
+        # NEW: Demographics Analysis (multi-frame approach)
+        demographics = analyze_demographics_with_fallback(local_video_path)
+        prog.progress(70, text="Analyzing demographics…")
+
+        results = {
+            "venue_name": venue_name,
+            "venue_type": venue_type or "Other",
+            "audio_environment": audio,
+            "visual_environment": visual,
+            "crowd_density": crowd,
+            "mood_recognition": mood,
+            "demographics": demographics  # NEW
+        }
+        results["energy_score"] = calculate_energy_score(results)
+        prog.progress(85, text="Saving…")
+
+        ok, inserted_row, public_url = save_results_row(results, uploaded_file=up, content_hash=chash)
+        elapsed_ms = int((time.time()-t0)*1000)
+        if ok and inserted_row:
+            if public_url:
+                inserted_row["public_url"] = public_url
+                inserted_row["video_url"]  = public_url
+            log_event("analysis_done", cid, ok=True, elapsed_ms=elapsed_ms, mood_conf_zero=(float(inserted_row.get("mood_confidence",0))==0.0))
+            prog.progress(100, text="Done")
+            display_results(inserted_row)
+        else:
+            log_event("analysis_failed", cid, reason="insert_failed")
+            st.error("Could not save results.")
+
+        # Cleanup temp files
+        try:
+            os.unlink(local_video_path)
+            os.unlink(mid_frame_path)
+        except Exception:
+            pass
+
+# -------- History Tab --------
+with tab_history:
+    st.subheader("My Videos")
+    if not st.session_state.user:
+        st.info("Please sign in to view your history.")
+    else:
+        # Simple pagination
+        page = st.number_input("Page", min_value=1, value=1, step=1)
+        page_size = 10
+        from_idx = (page-1)*page_size
+        try:
+            rows = supabase.table("video_results") \
+                .select("*") \
+                .eq("user_id", st.session_state.user.id) \
+                .order("created_at", desc=True) \
+                .range(int(from_idx), int(from_idx + page_size - 1)) \
+                .execute().data
+        except Exception as e:
+            st.error(f"Failed to fetch results: {e}")
+            rows = []
+
+        if not rows:
+            st.info("No results yet.")
+        else:
+            for r in rows:
+                st.markdown("---")
+                # Legacy rows: allow reattach
+                if not r.get("public_url") and not r.get("video_url"):
+                    st.warning("No video available for playback for this row.")
+                    upfix = st.file_uploader("Reattach original file for this row", type=["mp4","mov","m4v","avi"], key=f"fix_{r['id']}")
+                    if upfix:
+                        ch = sha256_bytes(upfix.getvalue())
+                        if ch != r.get("content_hash"):
+                            st.error("That file doesn't match this row's original content hash.")
+                        else:
+                            urls, base = upload_video_to_storage(upfix, st.session_state.user.id, ch)
+                            if urls:
+                                try:
+                                    supabase.table("video_results").update({
+                                        "storage_path": f"videos/{base}",
+                                        "public_url": urls["proxy_url"],
+                                        "video_url": urls["proxy_url"],
+                                        "video_stored": True
+                                    }).eq("id", r["id"]).execute()
+                                    st.success("Video reattached. Refresh to play.")
+                                except Exception as e:
+                                    st.error(f"Failed to update row: {e}")
+
+                display_results(r)
