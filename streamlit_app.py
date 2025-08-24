@@ -9,6 +9,9 @@ from typing import Tuple, Optional, Dict, Any
 import numpy as np
 from PIL import Image
 
+import imageio_ffmpeg, os
+os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
+
 import streamlit as st
 st.set_page_config(page_title="SneakPeak Video Scorer", page_icon="🎥", layout="wide")
 
