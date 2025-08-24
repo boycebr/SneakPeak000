@@ -1,15 +1,52 @@
-streamlit>=1.28.0
-moviepy>=1.0.3
-requests>=2.31.0
-numpy>=1.24.0
-pillow>=10.0.0
-matplotlib>=3.7.0
-google-cloud-vision>=3.4.0
-opencv-python-headless>=4.8.0
-librosa>=0.10.0
-soundfile>=0.12.0
+# SneakPeak Video Scorer - Complete Requirements
+# Updated with InsightFace and AWS Rekognition support
+
+# Core Streamlit and Web Framework
+streamlit==1.28.0
+requests==2.31.0
+
+# Data Processing and Analysis
+numpy==1.24.3
+pandas==2.0.3
+
+# Visualization
+matplotlib==3.7.2
+seaborn==0.12.2
+plotly==5.18.0
+
+# Video Processing
+moviepy==1.0.3
+opencv-python-headless==4.8.1.78
+
+# Image Processing
+pillow==10.0.0
+
+# Database and Storage
+supabase==2.7.4
+postgrest==0.16.8
+
+# NEW: Gender Detection and Face Analysis
+insightface>=0.7.3
+onnxruntime>=1.15.0
+onnxruntime-gpu>=1.15.0  # Optional: for GPU acceleration
+
+# NEW: AWS Rekognition Support
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Audio Analysis (if you want to add real audio features later)
+# librosa>=0.10.1
+# soundfile>=0.12.1
+
+# Utilities
+python-dotenv>=1.0.0
+uuid
+hashlib2
+tempfile
+colorsys
+
+# Optional: Enhanced video processing
 ffmpeg-python>=0.2.0
-imageio>=2.34
-imageio-ffmpeg>=0.4.9
-seaborn>=0.13.0
-supabase>=2.3.0
+
+# Development and Testing
+pytest>=7.4.0  # Optional: for testing
