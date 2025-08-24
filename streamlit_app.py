@@ -2,13 +2,14 @@
 # SneakPeak Video Scorer — 480p proxy, basic AV heuristics, optional demographics (InsightFace / AWS Rekognition)
 # Security: NO hard-coded credentials. Load secrets from environment or st.secrets.
 
-import os, io, time, uuid, hashlib, tempfile
+import os, io, time, uuid, hashlib, tempfile, subprocess
 from datetime import datetime
 from typing import Tuple, Optional, Dict, Any
 
 import numpy as np
 from PIL import Image
 
+# Point MoviePy (and our fallback) at the bundled ffmpeg
 import imageio_ffmpeg
 os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
 
@@ -25,12 +26,23 @@ def _init_msg(level: str, text: str):
 # ----------------------------
 # Optional dependencies
 # ----------------------------
-MOVIEPY_OK = True
+MOVIEPY_AVAILABLE = True
 try:
     from moviepy.editor import VideoFileClip
-except Exception:
-    MOVIEPY_OK = False
-    _init_msg("error", "MoviePy/ffmpeg not available. Proxy generation will fail.")
+except Exception as e:
+    MOVIEPY_AVAILABLE = False
+    _init_msg("warning", f"MoviePy not available; will use raw ffmpeg. ({e})")
+
+# Is an ffmpeg binary available?
+try:
+    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+    VIDEO_PROCESSING_OK = bool(FFMPEG_EXE and os.path.isfile(FFMPEG_EXE))
+    if not VIDEO_PROCESSING_OK:
+        _init_msg("error", "ffmpeg binary not found on disk.")
+except Exception as e:
+    FFMPEG_EXE = ""
+    VIDEO_PROCESSING_OK = False
+    _init_msg("error", f"ffmpeg not available: {e}")
 
 INSIGHTFACE_OK = True
 try:
@@ -217,27 +229,43 @@ def log_event(stage: str, correlation_id: str, **fields):
         m["fail"] += 1
 
 # ----------------------------
-# Video ops
+# Video ops (MoviePy if available, else raw ffmpeg)
 # ----------------------------
 def make_480p_proxy(file_bytes: bytes, max_seconds: int = 60) -> tuple[str, float]:
-    if not MOVIEPY_OK:
-        raise RuntimeError("MoviePy/ffmpeg not available for proxy generation.")
+    # Save source to a temp file
     src_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     src_tmp.write(file_bytes); src_tmp.flush(); src_tmp.close()
 
-    clip = VideoFileClip(src_tmp.name)
-    duration = float(clip.duration or 0.0)
-    end = min(duration, float(max_seconds))
-    sub = clip.subclip(0, end).resize(height=480)
+    if MOVIEPY_AVAILABLE:
+        clip = VideoFileClip(src_tmp.name)
+        duration = float(clip.duration or 0.0)
+        end = min(duration, float(max_seconds))
+        sub = clip.subclip(0, end).resize(height=480)
+        out_tmp = tempfile.NamedTemporaryFile(delete=False, suffix="_480p.mp4"); out_tmp.close()
+        sub.write_videofile(out_tmp.name, codec="libx264", audio_codec="aac",
+                            threads=2, verbose=False, logger=None)
+        clip.close(); sub.close()
+        return out_tmp.name, end
+
+    if not VIDEO_PROCESSING_OK:
+        raise RuntimeError("No video processing backend available (MoviePy and ffmpeg both unavailable).")
+
+    end = float(max_seconds)
     out_tmp = tempfile.NamedTemporaryFile(delete=False, suffix="_480p.mp4"); out_tmp.close()
-    sub.write_videofile(out_tmp.name, codec="libx264", audio_codec="aac", threads=2, verbose=False, logger=None)
-    clip.close(); sub.close()
+    cmd = (
+        f'"{FFMPEG_EXE}" -y -hide_banner -loglevel error '
+        f'-i "{src_tmp.name}" -t {end} -vf scale=-2:480 '
+        f'-c:v libx264 -preset veryfast -crf 23 -c:a aac -movflags +faststart "{out_tmp.name}"'
+    )
+    proc = subprocess.run(cmd, shell=True)
+    if proc.returncode != 0 or not os.path.exists(out_tmp.name):
+        raise RuntimeError("ffmpeg failed to create 480p proxy.")
     return out_tmp.name, end
 
 @st.cache_data(show_spinner=False)
 def grab_middle_frame(local_video_path: str) -> str:
     try:
-        if not MOVIEPY_OK:
+        if not MOVIEPY_AVAILABLE:
             raise RuntimeError("MoviePy not available")
         clip = VideoFileClip(local_video_path)
         t = (clip.duration or 0) / 2.0
@@ -292,7 +320,7 @@ def calculate_energy_score(results: dict) -> float:
 # ----------------------------
 def extract_frames_for_analysis(video_path: str) -> list:
     try:
-        if not MOVIEPY_OK:
+        if not MOVIEPY_AVAILABLE:
             raise RuntimeError("MoviePy not available")
         clip = VideoFileClip(video_path); duration = clip.duration or 0
         sample_times = [duration/2.0] if duration < 1.0 else [duration*0.25, duration*0.50, duration*0.75]
@@ -765,7 +793,7 @@ with st.sidebar:
     st.markdown("### Analysis Engines")
     st.write("InsightFace:", "✅ Ready" if insightface_app else "❌ Unavailable")
     st.write("AWS Rekognition:", "✅ Ready" if rekog_client else "❌ Unavailable")
-    st.write("Video Processing:", "✅ Ready" if MOVIEPY_OK else "❌ Unavailable")
+    st.write("Video Processing:", "✅ Ready" if VIDEO_PROCESSING_OK else "❌ Unavailable")
 
     st.markdown("---")
     st.markdown("### Observability (session)")
