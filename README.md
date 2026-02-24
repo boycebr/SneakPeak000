@@ -2,7 +2,7 @@
 
 Real-time venue intelligence platform. Upload a short video of any venue, get an AI-generated energy score, and discover what's happening nearby.
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://sneakpeak.streamlit.app)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-9bk2d832xko.streamlit.app/)
 
 ## Features
 
