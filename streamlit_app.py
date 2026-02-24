@@ -691,14 +691,15 @@ def render_auth_header():
                 st.rerun()
 
 
-def render_auth_form():
+def render_auth_form(key_prefix=""):
     """Render login / signup form. Returns True if user just authenticated."""
+    p = f"{key_prefix}_" if key_prefix else ""
     tab_login, tab_signup = st.tabs(["Sign In", "Create Account"])
 
     with tab_login:
-        with st.form("login_form"):
-            email = st.text_input("Email", key="login_email")
-            password = st.text_input("Password", type="password", key="login_pw")
+        with st.form(f"{p}login_form"):
+            email = st.text_input("Email", key=f"{p}login_email")
+            password = st.text_input("Password", type="password", key=f"{p}login_pw")
             submitted = st.form_submit_button("Sign In", use_container_width=True)
         if submitted:
             if not email or not password:
@@ -714,11 +715,11 @@ def render_auth_form():
             return False
 
     with tab_signup:
-        with st.form("signup_form"):
-            new_email = st.text_input("Email", key="signup_email")
-            new_pw = st.text_input("Password", type="password", key="signup_pw",
+        with st.form(f"{p}signup_form"):
+            new_email = st.text_input("Email", key=f"{p}signup_email")
+            new_pw = st.text_input("Password", type="password", key=f"{p}signup_pw",
                                    help="Minimum 6 characters")
-            confirm_pw = st.text_input("Confirm Password", type="password", key="signup_pw2")
+            confirm_pw = st.text_input("Confirm Password", type="password", key=f"{p}signup_pw2")
             submitted = st.form_submit_button("Create Account", use_container_width=True)
         if submitted:
             if not new_email or not new_pw:
@@ -1029,7 +1030,7 @@ def page_upload():
 
     if not is_logged_in():
         st.info("Sign in to upload venue videos. Browsing is free!")
-        render_auth_form()
+        render_auth_form(key_prefix="upload")
         return
 
     st.markdown("Help others by sharing what's happening right now!")
@@ -1384,7 +1385,7 @@ def page_profile():
             <p>Create an account or sign in to track your uploads, rate venues, and build your profile.</p>
         </div>
         """, unsafe_allow_html=True)
-        render_auth_form()
+        render_auth_form(key_prefix="profile")
 
     # ── System status (always visible) ──
     st.markdown("---")
