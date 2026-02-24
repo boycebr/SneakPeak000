@@ -58,6 +58,8 @@ from utils.database import (
     get_ratings_for_venue,
     get_user_submissions,
     get_user_rating_count,
+    search_venues,
+    get_nearby_venues,
 )
 from utils.auth import sign_up, sign_in, sign_out, get_user, refresh_session
 
@@ -211,6 +213,26 @@ input, select, textarea {
     width: 100%;
 }
 
+/* Live indicator pulse */
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.4; }
+    100% { opacity: 1; }
+}
+.live-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    background: #28a745;
+    border-radius: 50%;
+    animation: pulse 1.5s infinite;
+    margin-right: 4px;
+}
+
+/* Search input styling */
+input[data-testid="stTextInput"] {
+    border-radius: 20px !important;
+}
+
 /* Hide Streamlit branding */
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
@@ -243,6 +265,13 @@ def init_session():
         st.session_state.current_page = 'discover'
     if 'processing_status' not in st.session_state:
         st.session_state.processing_status = None
+    # Geolocation
+    if 'user_lat' not in st.session_state:
+        st.session_state.user_lat = None
+    if 'user_lon' not in st.session_state:
+        st.session_state.user_lon = None
+    if 'auto_refresh' not in st.session_state:
+        st.session_state.auto_refresh = False
     # Auth state
     if 'access_token' not in st.session_state:
         st.session_state.access_token = None
@@ -276,6 +305,67 @@ def _clear_auth_state():
     st.session_state.refresh_token = None
     st.session_state.user_id = None
     st.session_state.user_email = None
+
+
+# ================================
+# GEOLOCATION
+# ================================
+
+def request_geolocation():
+    """Inject JS to request browser GPS and store in query params.
+
+    Returns (lat, lon) if available, else (None, None).
+    Uses Streamlit's st.query_params as a bridge from JS → Python.
+    """
+    # Check if we already have coordinates in session state
+    if st.session_state.get("user_lat") is not None:
+        return st.session_state.user_lat, st.session_state.user_lon
+
+    # Check query params (set by JS)
+    qp = st.query_params
+    lat_str = qp.get("lat")
+    lon_str = qp.get("lon")
+    if lat_str and lon_str:
+        try:
+            lat = float(lat_str)
+            lon = float(lon_str)
+            st.session_state.user_lat = lat
+            st.session_state.user_lon = lon
+            return lat, lon
+        except (ValueError, TypeError):
+            pass
+
+    return None, None
+
+
+def render_geolocation_button():
+    """Render a button that triggers browser geolocation via JS."""
+    import streamlit.components.v1 as components
+    if st.button("📍 Use My Location", key="geo_btn", use_container_width=True):
+        components.html("""
+        <script>
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(
+                function(pos) {
+                    const lat = pos.coords.latitude.toFixed(6);
+                    const lon = pos.coords.longitude.toFixed(6);
+                    // Update URL query params so Streamlit can read them
+                    const url = new URL(window.parent.location);
+                    url.searchParams.set('lat', lat);
+                    url.searchParams.set('lon', lon);
+                    window.parent.history.replaceState({}, '', url);
+                    // Trigger a rerun by clicking a hidden Streamlit element
+                    window.parent.location.reload();
+                },
+                function(err) {
+                    console.log('Geolocation error:', err.message);
+                },
+                {enableHighAccuracy: true, timeout: 10000}
+            );
+        }
+        </script>
+        """, height=0)
+
 
 # ================================
 # SUPABASE DATABASE FUNCTIONS
@@ -709,6 +799,9 @@ def render_venue_card(venue):
         chips += f' (~{people})'
     if genre:
         chips += f' | 🎵 {genre}'
+    dist_label = venue.get('_distance_label')
+    if dist_label:
+        chips += f' | 📍 {dist_label}'
     chips += f' | {time_label}'
 
     venue_id = venue.get('id')
@@ -776,51 +869,116 @@ def render_rating_form(video_result_id: int, venue_name: str):
 # ================================
 
 def page_discover():
-    """Discover page - browse venues"""
+    """Discover page - browse venues with search, filters, and geolocation"""
     st.markdown("## 🔍 Discover Venues")
 
     if 'discover_filter' not in st.session_state:
         st.session_state.discover_filter = "recent"
 
-    # Quick filters
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("🔥 Hot Now", use_container_width=True):
-            st.session_state.discover_filter = "hot"
-    with col2:
-        if st.button("😌 Chill", use_container_width=True):
-            st.session_state.discover_filter = "chill"
-    with col3:
-        if st.button("🆕 Recent", use_container_width=True):
-            st.session_state.discover_filter = "recent"
+    # ── Search bar ──
+    search_query = st.text_input(
+        "Search venues",
+        placeholder="Type a venue name...",
+        key="venue_search",
+        label_visibility="collapsed",
+    )
+
+    # ── Filter row ──
+    filter_cols = st.columns([1, 1, 1, 1])
+    filters = [
+        ("🔥 Hot", "hot"),
+        ("😌 Chill", "chill"),
+        ("🆕 Recent", "recent"),
+        ("📍 Nearby", "nearby"),
+    ]
+    for col, (label, key) in zip(filter_cols, filters):
+        with col:
+            is_active = st.session_state.discover_filter == key
+            btn_label = f"**{label}**" if is_active else label
+            if st.button(btn_label, key=f"filter_{key}", use_container_width=True):
+                st.session_state.discover_filter = key
+
+    # ── Type filter + auto-refresh row ──
+    opt_col1, opt_col2 = st.columns([3, 1])
+    with opt_col1:
+        venue_type_filter = st.selectbox(
+            "Venue type",
+            ["All Types", "Bar", "Nightclub", "Lounge", "Restaurant",
+             "Live Music", "Rooftop", "Pub", "Other"],
+            key="type_filter",
+            label_visibility="collapsed",
+        )
+    with opt_col2:
+        auto_refresh = st.toggle("Live", value=st.session_state.auto_refresh, key="live_toggle")
+        st.session_state.auto_refresh = auto_refresh
 
     active = st.session_state.discover_filter
-    st.caption(f"Showing: **{active.title()}**")
+    type_val = "" if venue_type_filter == "All Types" else venue_type_filter
+
+    # Show active filter label
+    label_map = {"hot": "🔥 Hottest", "chill": "😌 Chillest", "recent": "🆕 Most Recent", "nearby": "📍 Nearby"}
+    st.caption(f"Showing: **{label_map.get(active, active.title())}**"
+               + (f" matching \"{search_query}\"" if search_query else "")
+               + (f" | {venue_type_filter}" if type_val else "")
+               + (" | 🟢 Live" if auto_refresh else ""))
     st.markdown("---")
 
-    # Fetch venues based on active filter
-    if active == "hot":
+    # ── Geolocation for "Nearby" filter ──
+    user_lat, user_lon = request_geolocation()
+
+    if active == "nearby":
+        if user_lat is None:
+            st.info("Enable location to see nearby venues.")
+            render_geolocation_button()
+            venues = []
+        else:
+            venues = get_nearby_venues(
+                SUPABASE_URL, SUPABASE_ANON_KEY, user_lat, user_lon, radius_km=10.0
+            )
+    elif search_query or type_val:
+        venues = search_venues(
+            SUPABASE_URL, SUPABASE_ANON_KEY,
+            query=search_query, venue_type=type_val, sort=active,
+        )
+    elif active == "hot":
         venues = get_venues_by_energy(SUPABASE_URL, SUPABASE_ANON_KEY, order="desc", limit=20)
     elif active == "chill":
         venues = get_venues_by_energy(SUPABASE_URL, SUPABASE_ANON_KEY, order="asc", limit=20)
     else:
         venues = get_recent_venues(limit=20)
 
+    # ── Render results ──
     if venues:
         for venue in venues:
+            # Show distance chip if available
+            dist = venue.get("_distance_km")
+            if dist is not None:
+                venue["_distance_label"] = f"{dist:.1f} km away"
             render_venue_card(venue)
+        st.caption(f"{len(venues)} venue{'s' if len(venues) != 1 else ''} found")
     else:
-        st.info("🎉 No venues yet! Be the first to upload a video and help others discover great spots.")
+        st.markdown(
+            "<div class='metric-card' style='text-align:center; padding:2rem;'>"
+            "<p style='font-size:1.2rem;'>No venues found</p>"
+            "<p style='color:#888;'>Be the first to upload a video!</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        # Show sample data when DB is empty
+        if not search_query and not type_val:
+            st.markdown("### 📍 Sample Venues (Demo)")
+            sample_venues = [
+                {"venue_name": "The Basement", "venue_type": "Nightclub", "energy_score": 82, "crowd_density": "crowded"},
+                {"venue_name": "Rooftop Lounge", "venue_type": "Bar", "energy_score": 65, "crowd_density": "moderate"},
+                {"venue_name": "Jazz Corner", "venue_type": "Live Music", "energy_score": 58, "crowd_density": "sparse"},
+            ]
+            for venue in sample_venues:
+                render_venue_card(venue)
 
-        # Show sample data
-        st.markdown("### 📍 Sample Venues (Demo)")
-        sample_venues = [
-            {"venue_name": "The Basement", "venue_type": "Nightclub", "energy_score": 82, "crowd_density": "crowded"},
-            {"venue_name": "Rooftop Lounge", "venue_type": "Bar", "energy_score": 65, "crowd_density": "moderate"},
-            {"venue_name": "Jazz Corner", "venue_type": "Live Music", "energy_score": 58, "crowd_density": "sparse"},
-        ]
-        for venue in sample_venues:
-            render_venue_card(venue)
+    # ── Auto-refresh (rerun every 30s) ──
+    if auto_refresh:
+        time.sleep(30)
+        st.rerun()
 
 def page_upload():
     """Upload page - submit venue videos (login required)"""
@@ -848,13 +1006,15 @@ def page_upload():
             "Other"
         ])
         
-        # GPS coordinates (in production, get from device)
+        # GPS coordinates — pre-fill from browser geolocation if available
+        default_lat = st.session_state.user_lat or 40.7128
+        default_lon = st.session_state.user_lon or -74.0060
         st.markdown("##### 📍 Location")
         col1, col2 = st.columns(2)
         with col1:
-            latitude = st.number_input("Latitude", value=40.7128, format="%.6f")
+            latitude = st.number_input("Latitude", value=default_lat, format="%.6f")
         with col2:
-            longitude = st.number_input("Longitude", value=-74.0060, format="%.6f")
+            longitude = st.number_input("Longitude", value=default_lon, format="%.6f")
         
         # Video upload
         uploaded_file = st.file_uploader(

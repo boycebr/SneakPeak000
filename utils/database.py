@@ -81,6 +81,88 @@ def get_venues_by_energy(supabase_url: str, api_key: str, order: str = "desc", l
         return []
 
 
+def search_venues(
+    supabase_url: str,
+    api_key: str,
+    query: str = "",
+    venue_type: str = "",
+    sort: str = "recent",
+    limit: int = 20,
+) -> list:
+    """Search venues with optional name filter, type filter, and sort order.
+
+    Args:
+        query: Case-insensitive substring match on venue_name.
+        venue_type: Exact match on venue_type (empty = all).
+        sort: "recent", "hot" (energy desc), or "chill" (energy asc).
+    """
+    try:
+        params = "select=*"
+        if query:
+            params += f"&venue_name=ilike.*{query}*"
+        if venue_type:
+            params += f"&venue_type=eq.{venue_type}"
+        if sort == "hot":
+            params += "&order=energy_score.desc.nullslast"
+        elif sort == "chill":
+            params += "&order=energy_score.asc.nullslast"
+        else:
+            params += "&order=created_at.desc"
+        params += f"&limit={limit}"
+
+        url = f"{supabase_url}/rest/v1/video_results?{params}"
+        resp = requests.get(url, headers=get_supabase_headers(api_key), timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return []
+    except Exception:
+        return []
+
+
+def get_nearby_venues(
+    supabase_url: str,
+    api_key: str,
+    lat: float,
+    lon: float,
+    radius_km: float = 10.0,
+    limit: int = 20,
+) -> list:
+    """Fetch venues near a GPS point, sorted by distance.
+
+    Uses a simple bounding-box filter (PostgREST doesn't do Haversine natively).
+    Distance is approximated client-side after fetch.
+    """
+    try:
+        # ~0.009 degrees per km at mid-latitudes
+        delta = radius_km * 0.009
+        params = (
+            f"select=*"
+            f"&latitude=gte.{lat - delta}&latitude=lte.{lat + delta}"
+            f"&longitude=gte.{lon - delta}&longitude=lte.{lon + delta}"
+            f"&order=created_at.desc&limit={limit}"
+        )
+        url = f"{supabase_url}/rest/v1/video_results?{params}"
+        resp = requests.get(url, headers=get_supabase_headers(api_key), timeout=10)
+        if resp.status_code == 200:
+            venues = resp.json()
+            # Add approximate distance and sort by it
+            import math
+            for v in venues:
+                vlat = float(v.get("latitude") or 0)
+                vlon = float(v.get("longitude") or 0)
+                dlat = math.radians(vlat - lat)
+                dlon = math.radians(vlon - lon)
+                a = (math.sin(dlat / 2) ** 2 +
+                     math.cos(math.radians(lat)) * math.cos(math.radians(vlat)) *
+                     math.sin(dlon / 2) ** 2)
+                v["_distance_km"] = round(6371 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)), 2)
+            venues.sort(key=lambda v: v.get("_distance_km", 999))
+            return venues
+        return []
+    except Exception:
+        return []
+
+
 # ── Supabase Storage ─────────────────────────────────────────────────────
 
 STORAGE_BUCKET = "venue-media"
