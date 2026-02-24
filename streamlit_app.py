@@ -46,7 +46,10 @@ from utils.video_processing import (
     frame_to_jpeg_bytes,
     generate_thumbnail,
     validate_video,
+    compute_motion_score,
+    extract_mood_from_faces,
 )
+from utils.audio_analysis import analyze_audio_real
 from utils.database import (
     upload_to_storage,
     generate_storage_path,
@@ -359,27 +362,13 @@ def extract_frames(video_path, num_frames=5):
     
     return frames
 
-    # detect_faces_google_vision and blur_faces_in_frame are now in utils/
-    # Imported via: from utils.video_processing import process_frame_privacy
+    # Inline analysis functions replaced by utils imports:
+    # - analyze_audio_real (from utils.audio_analysis)
+    # - compute_motion_score, extract_mood_from_faces (from utils.video_processing)
 
 # ================================
 # ANALYSIS FUNCTIONS
 # ================================
-
-def analyze_audio_simulated(video_path):
-    """Analyze audio characteristics (simulated for MVP)"""
-    # For MVP, we use simulated values
-    # In production, integrate with Librosa or Azure Audio
-    
-    np.random.seed(hash(video_path) % 2**32)
-    
-    return {
-        "bpm": int(np.random.uniform(90, 140)),
-        "volume_level": round(np.random.uniform(65, 95), 1),
-        "genre": np.random.choice(["Electronic", "Hip-Hop", "Pop", "Latin", "Rock", "House"]),
-        "energy_level": np.random.choice(["low", "medium", "high"]),
-        "tempo_consistency": round(np.random.uniform(0.7, 0.95), 2)
-    }
 
 def analyze_visual(frames):
     """Analyze visual characteristics from frames"""
@@ -388,23 +377,22 @@ def analyze_visual(frames):
             "brightness_level": 50.0,
             "lighting_type": "Unknown",
             "color_scheme": "Unknown",
-            "visual_energy": "medium"
+            "visual_energy": "medium",
+            "color_saturation": 50.0,
         }
-    
+
     try:
         brightness_values = []
         saturation_values = []
-        
+
         for frame in frames:
-            # Convert to HSV for better analysis
             hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
-            brightness_values.append(np.mean(hsv[:, :, 2]))  # V channel
-            saturation_values.append(np.mean(hsv[:, :, 1]))  # S channel
-        
+            brightness_values.append(np.mean(hsv[:, :, 2]))
+            saturation_values.append(np.mean(hsv[:, :, 1]))
+
         avg_brightness = np.mean(brightness_values)
         avg_saturation = np.mean(saturation_values)
-        
-        # Determine lighting type
+
         if avg_brightness < 50:
             lighting_type = "Dark/Club"
         elif avg_brightness < 100:
@@ -413,8 +401,8 @@ def analyze_visual(frames):
             lighting_type = "Moderate"
         else:
             lighting_type = "Bright"
-        
-        # Determine visual energy
+
+        # Use motion score for visual energy (injected by caller)
         brightness_variance = np.var(brightness_values)
         if brightness_variance > 500:
             visual_energy = "high"
@@ -422,28 +410,27 @@ def analyze_visual(frames):
             visual_energy = "medium"
         else:
             visual_energy = "low"
-        
-        # Color scheme (simplified)
+
         color_scheme = "Warm" if avg_saturation > 100 else "Cool/Neutral"
-        
+
         return {
             "brightness_level": round((avg_brightness / 255) * 100, 1),
             "lighting_type": lighting_type,
             "color_scheme": color_scheme,
             "visual_energy": visual_energy,
-            "color_saturation": round((avg_saturation / 255) * 100, 1)
+            "color_saturation": round((avg_saturation / 255) * 100, 1),
         }
-    except Exception as e:
+    except Exception:
         return {
             "brightness_level": 50.0,
             "lighting_type": "Unknown",
             "color_scheme": "Unknown",
-            "visual_energy": "medium"
+            "visual_energy": "medium",
+            "color_saturation": 50.0,
         }
 
 def analyze_crowd(frames, face_count):
     """Analyze crowd density and activity"""
-    # Determine density based on face count
     if face_count <= 3:
         density = "sparse"
         density_score = face_count * 2
@@ -456,45 +443,62 @@ def analyze_crowd(frames, face_count):
     else:
         density = "packed"
         density_score = 17 + min((face_count - 25) * 0.1, 3)
-    
+
     return {
         "crowd_density": density,
         "density_score": round(min(density_score, 20), 1),
         "estimated_people": face_count,
         "activity_level": "Active" if face_count > 5 else "Calm",
-        "engagement_score": min(face_count * 5, 100)
+        "engagement_score": min(face_count * 5, 100),
     }
 
-def calculate_energy_score(audio, visual, crowd, mood_joy=50):
-    """Calculate overall venue energy score"""
+def calculate_energy_score(audio, visual, crowd, motion=None, mood=None):
+    """Calculate overall venue energy score.
+
+    Weights:
+        Audio (BPM + volume)     — 25%
+        Visual (brightness/light) — 15%
+        Motion (frame diffs)      — 20%
+        Crowd (density)           — 20%
+        Mood (face expressions)   — 20%
+    """
     try:
-        # Audio component (30%)
-        bpm_score = min((audio.get("bpm", 100) - 60) / 140 * 100, 100)
-        volume_score = min((audio.get("volume_level", 70) - 40) / 60 * 100, 100)
+        # Audio component (25%)
+        bpm_score = min(max((audio.get("bpm", 100) - 60) / 140 * 100, 0), 100)
+        volume_score = min(max((audio.get("volume_level", 70) - 40) / 60 * 100, 0), 100)
         audio_energy = (bpm_score + volume_score) / 2
-        
-        # Visual component (25%)
+
+        # Visual component (15%)
         brightness = visual.get("brightness_level", 50)
         visual_energy_map = {"low": 30, "medium": 50, "high": 80}
         visual_activity = visual_energy_map.get(visual.get("visual_energy", "medium"), 50)
         visual_score = (brightness * 0.4 + visual_activity * 0.6)
-        
-        # Crowd component (25%)
+
+        # Motion component (20%) — real frame-difference data
+        if motion and "motion_score" in motion:
+            motion_score = motion["motion_score"]
+        else:
+            motion_score = 50.0
+
+        # Crowd component (20%)
         crowd_score = (crowd.get("density_score", 5) / 20) * 100
-        
-        # Mood component (20%)
-        mood_score = mood_joy
-        
-        # Weighted calculation
+
+        # Mood component (20%) — from face expression analysis
+        if mood and "mood_score" in mood:
+            mood_score = mood["mood_score"]
+        else:
+            mood_score = 50.0
+
         energy_score = (
-            audio_energy * 0.30 +
-            visual_score * 0.25 +
-            crowd_score * 0.25 +
+            audio_energy * 0.25 +
+            visual_score * 0.15 +
+            motion_score * 0.20 +
+            crowd_score * 0.20 +
             mood_score * 0.20
         )
-        
+
         return round(max(0, min(100, energy_score)), 1)
-    except Exception as e:
+    except Exception:
         return 50.0
 
 # ================================
@@ -793,27 +797,50 @@ def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longit
             if ok:
                 thumbnail_url = url_or_err
 
-        # Step 6: Audio analysis
+        # Step 6: Audio analysis (real via Librosa, fallback to simulated)
         status.info("🎵 Analyzing audio...")
-        progress.progress(55)
-        audio_results = analyze_audio_simulated(video_path)
+        progress.progress(50)
+        audio_results = analyze_audio_real(video_path)
 
         # Step 7: Visual analysis
         status.info("🎨 Analyzing visuals...")
-        progress.progress(65)
+        progress.progress(58)
         visual_results = analyze_visual(frames)
 
-        # Step 8: Crowd analysis
+        # Step 8: Motion detection (frame differences)
+        status.info("🏃 Measuring activity...")
+        progress.progress(65)
+        motion_results = compute_motion_score(frames)
+
+        # Step 9: Mood estimation from face expressions
+        status.info("😊 Reading the vibe...")
+        progress.progress(72)
+        all_detected_faces = []
+        if frames:
+            for frame in frames[:3]:
+                r = process_frame_privacy(
+                    frame,
+                    google_api_key=GOOGLE_CLOUD_API_KEY,
+                    azure_api_key=AZURE_FACE_API_KEY,
+                    azure_endpoint=AZURE_FACE_ENDPOINT,
+                )
+                all_detected_faces.extend(r["faces"])
+        mood_results = extract_mood_from_faces(all_detected_faces)
+
+        # Step 10: Crowd analysis
         status.info("👥 Analyzing crowd...")
-        progress.progress(75)
+        progress.progress(80)
         crowd_results = analyze_crowd(frames, total_faces)
 
-        # Step 9: Calculate energy score
+        # Step 11: Calculate energy score (all 5 components)
         status.info("⚡ Calculating energy score...")
-        progress.progress(85)
-        energy_score = calculate_energy_score(audio_results, visual_results, crowd_results)
+        progress.progress(88)
+        energy_score = calculate_energy_score(
+            audio_results, visual_results, crowd_results,
+            motion=motion_results, mood=mood_results,
+        )
 
-        # Step 10: Save to database
+        # Step 12: Save to database
         status.info("💾 Saving results...")
         progress.progress(95)
 
@@ -835,12 +862,20 @@ def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longit
             "color_scheme": visual_results.get("color_scheme"),
             "visual_energy": visual_results.get("visual_energy"),
             "color_saturation": visual_results.get("color_saturation"),
+            # Motion
+            "visual_activity_score": motion_results.get("motion_score"),
+            "movement_patterns": motion_results.get("motion_level"),
             # Crowd
             "crowd_density": crowd_results.get("crowd_density"),
             "activity_level": crowd_results.get("activity_level"),
             "density_score": crowd_results.get("density_score"),
             "estimated_people": crowd_results.get("estimated_people"),
             "engagement_score": crowd_results.get("engagement_score"),
+            # Mood
+            "dominant_mood": mood_results.get("dominant_mood"),
+            "mood_confidence": mood_results.get("mood_confidence"),
+            "joy_percentage": mood_results.get("joy_percentage"),
+            "overall_vibe": mood_results.get("dominant_mood"),
             # Privacy
             "face_count": total_faces,
             "faces_blurred": total_faces,

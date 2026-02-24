@@ -224,3 +224,100 @@ def validate_video(file_size_bytes: int, duration: float, min_dur: int, max_dur:
     if duration > max_dur:
         errors.append(f"Video too long ({duration:.1f}s). Maximum is {max_dur}s.")
     return errors
+
+
+# ── Motion Detection ─────────────────────────────────────────────────────
+
+def compute_motion_score(frames: list) -> dict:
+    """Compute motion/activity score from frame differences.
+
+    Compares consecutive frames to measure how much movement exists.
+    Returns a 0-100 score and a descriptive level.
+    """
+    if not CV2_AVAILABLE or len(frames) < 2:
+        return {"motion_score": 50.0, "motion_level": "medium"}
+
+    diffs = []
+    for i in range(len(frames) - 1):
+        gray1 = cv2.cvtColor(frames[i], cv2.COLOR_RGB2GRAY)
+        gray2 = cv2.cvtColor(frames[i + 1], cv2.COLOR_RGB2GRAY)
+        diff = cv2.absdiff(gray1, gray2)
+        mean_diff = float(np.mean(diff))
+        diffs.append(mean_diff)
+
+    avg_motion = np.mean(diffs)
+    # Scale: 0-5 = still, 5-15 = moderate, 15+ = active
+    # Map to 0-100
+    motion_score = round(min(100, (avg_motion / 25.0) * 100), 1)
+
+    if motion_score >= 65:
+        level = "high"
+    elif motion_score >= 30:
+        level = "medium"
+    else:
+        level = "low"
+
+    return {
+        "motion_score": motion_score,
+        "motion_level": level,
+        "raw_diff": round(float(avg_motion), 2),
+    }
+
+
+# ── Mood Extraction ──────────────────────────────────────────────────────
+
+LIKELIHOOD_SCORES = {
+    "VERY_LIKELY": 95,
+    "LIKELY": 75,
+    "POSSIBLE": 50,
+    "UNLIKELY": 20,
+    "VERY_UNLIKELY": 5,
+    "UNKNOWN": 0,
+}
+
+
+def extract_mood_from_faces(all_faces: list) -> dict:
+    """Aggregate mood data from face detection results.
+
+    Uses joy/sorrow likelihood from Google Vision (already in normalized face dicts).
+    Falls back to neutral if no mood data available.
+    """
+    if not all_faces:
+        return {
+            "dominant_mood": "neutral",
+            "joy_percentage": 0.0,
+            "mood_confidence": 0.0,
+            "mood_score": 50.0,
+        }
+
+    joy_scores = []
+    sorrow_scores = []
+
+    for face in all_faces:
+        joy = face.get("joy", "UNKNOWN")
+        sorrow = face.get("sorrow", "UNKNOWN")
+        joy_scores.append(LIKELIHOOD_SCORES.get(joy, 0))
+        sorrow_scores.append(LIKELIHOOD_SCORES.get(sorrow, 0))
+
+    avg_joy = np.mean(joy_scores) if joy_scores else 0
+    avg_sorrow = np.mean(sorrow_scores) if sorrow_scores else 0
+
+    # Determine dominant mood
+    if avg_joy >= 60:
+        dominant = "happy"
+    elif avg_joy >= 40:
+        dominant = "positive"
+    elif avg_sorrow >= 40:
+        dominant = "somber"
+    else:
+        dominant = "neutral"
+
+    # Mood score: 0 (very sad) to 100 (very happy)
+    mood_score = round(min(100, max(0, 50 + (avg_joy - avg_sorrow) / 2)), 1)
+
+    return {
+        "dominant_mood": dominant,
+        "joy_percentage": round(avg_joy, 1),
+        "mood_confidence": round(max(avg_joy, avg_sorrow), 1),
+        "mood_score": mood_score,
+    }
