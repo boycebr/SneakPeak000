@@ -126,3 +126,70 @@ def generate_storage_path(venue_name: str, suffix: str = ".jpg") -> str:
     uid = uuid.uuid4().hex[:8]
     safe_name = "".join(c if c.isalnum() else "_" for c in venue_name)[:30]
     return f"thumbnails/{timestamp}_{safe_name}_{uid}{suffix}"
+
+
+# ── User Ratings ────────────────────────────────────────────────────────
+
+def save_user_rating(supabase_url: str, api_key: str, data: dict) -> tuple:
+    """Insert a row into user_ratings. Returns (success, response_or_error)."""
+    try:
+        url = f"{supabase_url}/rest/v1/user_ratings"
+        resp = requests.post(
+            url, headers=get_supabase_headers(api_key), json=data, timeout=10
+        )
+        if resp.status_code in [200, 201]:
+            return True, resp.json()
+        return False, f"Error {resp.status_code}: {resp.text}"
+    except Exception as e:
+        return False, str(e)
+
+
+def get_ratings_for_venue(supabase_url: str, api_key: str, video_result_id: int) -> list:
+    """Fetch all ratings for a specific venue result."""
+    try:
+        url = (
+            f"{supabase_url}/rest/v1/user_ratings"
+            f"?video_result_id=eq.{video_result_id}&order=created_at.desc"
+        )
+        resp = requests.get(url, headers=get_supabase_headers(api_key), timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return []
+    except Exception:
+        return []
+
+
+def get_user_submissions(supabase_url: str, api_key: str, user_id: str, limit: int = 20) -> list:
+    """Fetch video_results submitted by a specific user."""
+    try:
+        url = (
+            f"{supabase_url}/rest/v1/video_results"
+            f"?user_id=eq.{user_id}&order=created_at.desc&limit={limit}"
+        )
+        resp = requests.get(url, headers=get_supabase_headers(api_key), timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return []
+    except Exception:
+        return []
+
+
+def get_user_rating_count(supabase_url: str, api_key: str, user_id: str) -> int:
+    """Count how many ratings a user has submitted."""
+    try:
+        url = (
+            f"{supabase_url}/rest/v1/user_ratings"
+            f"?user_id=eq.{user_id}&select=id"
+        )
+        headers = get_supabase_headers(api_key)
+        headers["Prefer"] = "count=exact"
+        resp = requests.get(url, headers=headers, timeout=10)
+        # count is in content-range header
+        cr = resp.headers.get("content-range", "")
+        if "/" in cr:
+            return int(cr.split("/")[1])
+        if resp.status_code == 200:
+            return len(resp.json())
+        return 0
+    except Exception:
+        return 0

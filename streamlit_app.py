@@ -54,7 +54,12 @@ from utils.database import (
     upload_to_storage,
     generate_storage_path,
     get_venues_by_energy,
+    save_user_rating,
+    get_ratings_for_venue,
+    get_user_submissions,
+    get_user_rating_count,
 )
+from utils.auth import sign_up, sign_in, sign_out, get_user, refresh_session
 
 # Video/Image processing
 try:
@@ -238,8 +243,39 @@ def init_session():
         st.session_state.current_page = 'discover'
     if 'processing_status' not in st.session_state:
         st.session_state.processing_status = None
+    # Auth state
+    if 'access_token' not in st.session_state:
+        st.session_state.access_token = None
+    if 'refresh_token' not in st.session_state:
+        st.session_state.refresh_token = None
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = None
+    if 'user_email' not in st.session_state:
+        st.session_state.user_email = None
 
 init_session()
+
+
+def is_logged_in() -> bool:
+    """Check if the user has an active session."""
+    return st.session_state.access_token is not None
+
+
+def _set_auth_state(result: dict):
+    """Store auth tokens + user info in session state."""
+    st.session_state.access_token = result.get("access_token")
+    st.session_state.refresh_token = result.get("refresh_token")
+    user = result.get("user", {})
+    st.session_state.user_id = user.get("id")
+    st.session_state.user_email = user.get("email")
+
+
+def _clear_auth_state():
+    """Remove auth tokens from session state."""
+    st.session_state.access_token = None
+    st.session_state.refresh_token = None
+    st.session_state.user_id = None
+    st.session_state.user_email = None
 
 # ================================
 # SUPABASE DATABASE FUNCTIONS
@@ -502,6 +538,81 @@ def calculate_energy_score(audio, visual, crowd, motion=None, mood=None):
         return 50.0
 
 # ================================
+# AUTH UI
+# ================================
+
+def render_auth_header():
+    """Show logged-in user info or login prompt in a compact bar."""
+    if is_logged_in():
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.markdown(
+                f"<span style='color:#667eea; font-size:0.9rem;'>"
+                f"Signed in as <b>{st.session_state.user_email}</b></span>",
+                unsafe_allow_html=True,
+            )
+        with col2:
+            if st.button("Sign Out", key="signout_header"):
+                sign_out(SUPABASE_URL, SUPABASE_ANON_KEY, st.session_state.access_token)
+                _clear_auth_state()
+                st.rerun()
+
+
+def render_auth_form():
+    """Render login / signup form. Returns True if user just authenticated."""
+    tab_login, tab_signup = st.tabs(["Sign In", "Create Account"])
+
+    with tab_login:
+        with st.form("login_form"):
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_pw")
+            submitted = st.form_submit_button("Sign In", use_container_width=True)
+        if submitted:
+            if not email or not password:
+                st.error("Please enter email and password")
+                return False
+            result = sign_in(SUPABASE_URL, SUPABASE_ANON_KEY, email, password)
+            if result["success"]:
+                _set_auth_state(result)
+                st.success("Signed in!")
+                st.rerun()
+            else:
+                st.error(result["error"])
+            return False
+
+    with tab_signup:
+        with st.form("signup_form"):
+            new_email = st.text_input("Email", key="signup_email")
+            new_pw = st.text_input("Password", type="password", key="signup_pw",
+                                   help="Minimum 6 characters")
+            confirm_pw = st.text_input("Confirm Password", type="password", key="signup_pw2")
+            submitted = st.form_submit_button("Create Account", use_container_width=True)
+        if submitted:
+            if not new_email or not new_pw:
+                st.error("Please fill all fields")
+                return False
+            if new_pw != confirm_pw:
+                st.error("Passwords don't match")
+                return False
+            if len(new_pw) < 6:
+                st.error("Password must be at least 6 characters")
+                return False
+            result = sign_up(SUPABASE_URL, SUPABASE_ANON_KEY, new_email, new_pw)
+            if result["success"]:
+                if result.get("confirm_email"):
+                    st.info("Account created! Check your email to confirm, then sign in.")
+                else:
+                    _set_auth_state(result)
+                    st.success("Account created and signed in!")
+                    st.rerun()
+            else:
+                st.error(result["error"])
+            return False
+
+    return False
+
+
+# ================================
 # UI COMPONENTS
 # ================================
 
@@ -600,6 +711,10 @@ def render_venue_card(venue):
         chips += f' | 🎵 {genre}'
     chips += f' | {time_label}'
 
+    venue_id = venue.get('id')
+    mood = venue.get('dominant_mood', '')
+    mood_chip = f' | {mood.title()}' if mood else ''
+
     st.markdown(f"""
     <div class="venue-card">
         {thumb_html}
@@ -614,10 +729,47 @@ def render_venue_card(venue):
             </div>
         </div>
         <div style="margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #eee;">
-            <span style="font-size: 0.85rem; color: #888;">{chips}</span>
+            <span style="font-size: 0.85rem; color: #888;">{chips}{mood_chip}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+    # Rating widget (only for real DB venues, only for logged-in users)
+    if venue_id and is_logged_in():
+        with st.expander("Rate this venue", expanded=False):
+            render_rating_form(venue_id, name)
+
+
+def render_rating_form(video_result_id: int, venue_name: str):
+    """Inline rating form for a venue card."""
+    form_key = f"rate_{video_result_id}"
+    with st.form(form_key):
+        rating = st.slider("Overall vibe (1-5)", 1, 5, 3, key=f"r_{video_result_id}")
+        accuracy = st.slider("How accurate was the score? (1-5)", 1, 5, 3, key=f"a_{video_result_id}")
+        vibe = st.selectbox("What's the actual vibe?", [
+            "Buzzing", "Chill", "Dead", "Romantic", "Wild", "Cozy", "Loud",
+        ], key=f"v_{video_result_id}")
+        would_return = st.checkbox("Would you go back?", value=True, key=f"wr_{video_result_id}")
+        comment = st.text_input("Quick comment (optional)", key=f"c_{video_result_id}")
+        submitted = st.form_submit_button("Submit Rating")
+
+    if submitted:
+        data = {
+            "video_result_id": video_result_id,
+            "session_id": st.session_state.session_id,
+            "user_id": st.session_state.user_id,
+            "rating": rating,
+            "accuracy_rating": accuracy,
+            "actual_vibe": vibe,
+            "would_return": would_return,
+            "comment": comment if comment else None,
+        }
+        ok, resp = save_user_rating(SUPABASE_URL, SUPABASE_ANON_KEY, data)
+        if ok:
+            st.success(f"Thanks for rating {venue_name}!")
+        else:
+            st.error(f"Could not save rating: {resp}")
+
 
 # ================================
 # MAIN APPLICATION PAGES
@@ -671,10 +823,16 @@ def page_discover():
             render_venue_card(venue)
 
 def page_upload():
-    """Upload page - submit venue videos"""
+    """Upload page - submit venue videos (login required)"""
     st.markdown("## 📹 Share a Venue")
+
+    if not is_logged_in():
+        st.info("Sign in to upload venue videos. Browsing is free!")
+        render_auth_form()
+        return
+
     st.markdown("Help others by sharing what's happening right now!")
-    
+
     # Venue details
     with st.form("upload_form"):
         venue_name = st.text_input("📍 Venue Name", placeholder="e.g., The Rooftop Bar")
@@ -886,6 +1044,7 @@ def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longit
             "energy_score": energy_score,
             "processing_complete": True,
             "session_id": st.session_state.session_id,
+            "user_id": st.session_state.user_id,
             "video_duration": metadata.get("duration", 0),
         }
         
@@ -957,31 +1116,70 @@ def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longit
             pass
 
 def page_profile():
-    """Profile page - user stats"""
+    """Profile page - account, submission history, system status"""
     st.markdown("## 👤 Your Profile")
-    
-    st.markdown(f"""
-    <div class="metric-card" style="text-align: left; padding: 1.5rem;">
-        <h3 style="margin: 0 0 1rem 0;">Session Info</h3>
-        <p><strong>Session ID:</strong> {st.session_state.session_id[:8]}...</p>
-        <p><strong>Videos Shared:</strong> {st.session_state.videos_processed}</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
+
+    # ── Account section ──
+    if is_logged_in():
+        st.markdown(f"""
+        <div class="metric-card" style="text-align: left; padding: 1.5rem;">
+            <h3 style="margin: 0 0 1rem 0;">Account</h3>
+            <p><strong>Email:</strong> {st.session_state.user_email}</p>
+            <p><strong>User ID:</strong> {st.session_state.user_id[:8]}...</p>
+            <p><strong>Videos Shared (session):</strong> {st.session_state.videos_processed}</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button("Sign Out", key="signout_profile", use_container_width=True):
+            sign_out(SUPABASE_URL, SUPABASE_ANON_KEY, st.session_state.access_token)
+            _clear_auth_state()
+            st.rerun()
+
+        # ── Submission history ──
+        st.markdown("---")
+        st.markdown("### 📊 Your Submissions")
+        submissions = get_user_submissions(
+            SUPABASE_URL, SUPABASE_ANON_KEY, st.session_state.user_id
+        )
+        if submissions:
+            for sub in submissions:
+                render_venue_card(sub)
+        else:
+            st.info("You haven't uploaded any videos yet. Head to the Upload tab!")
+
+        # ── Rating stats ──
+        rating_count = get_user_rating_count(
+            SUPABASE_URL, SUPABASE_ANON_KEY, st.session_state.user_id
+        )
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Videos Uploaded", len(submissions) if submissions else 0)
+        with col2:
+            st.metric("Ratings Given", rating_count)
+
+    else:
+        st.markdown("""
+        <div class="metric-card" style="text-align: left; padding: 1.5rem;">
+            <h3 style="margin: 0 0 1rem 0;">Not signed in</h3>
+            <p>Create an account or sign in to track your uploads, rate venues, and build your profile.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        render_auth_form()
+
+    # ── System status (always visible) ──
     st.markdown("---")
-    
     st.markdown("### 🔧 System Status")
-    
-    # Check connections
+
     col1, col2 = st.columns(2)
-    
+
     with col1:
         if st.button("🔄 Test Supabase", use_container_width=True):
             if test_supabase_connection():
-                st.success("✅ Supabase connected!")
+                st.success("Supabase connected!")
             else:
-                st.error("❌ Supabase connection failed")
-    
+                st.error("Supabase connection failed")
+
     with col2:
         st.markdown(f"""
         **Libraries:**
@@ -1002,7 +1200,10 @@ def main():
         <p style="margin: 0.5rem 0; color: #666;">Real-time venue vibes</p>
     </div>
     """, unsafe_allow_html=True)
-    
+
+    # Auth status bar
+    render_auth_header()
+
     # Navigation tabs
     tab1, tab2, tab3 = st.tabs(["🔍 Discover", "📹 Upload", "👤 Profile"])
     
