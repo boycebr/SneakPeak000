@@ -190,3 +190,37 @@ def process_frame_privacy(
         "faces": faces,
         "source": source,
     }
+
+
+def generate_thumbnail(frame: np.ndarray, max_width: int = 400) -> bytes:
+    """Resize a frame to thumbnail size and return JPEG bytes."""
+    if not CV2_AVAILABLE:
+        return frame_to_jpeg_bytes(frame)
+
+    h, w = frame.shape[:2]
+    if w > max_width:
+        scale = max_width / w
+        new_w = max_width
+        new_h = int(h * scale)
+        resized = cv2.resize(
+            cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+            (new_w, new_h),
+            interpolation=cv2.INTER_AREA,
+        )
+        resized_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        return frame_to_jpeg_bytes(resized_rgb, quality=80)
+
+    return frame_to_jpeg_bytes(frame, quality=80)
+
+
+def validate_video(file_size_bytes: int, duration: float, min_dur: int, max_dur: int, max_size_mb: int) -> list:
+    """Validate video constraints. Returns list of error strings (empty = valid)."""
+    errors = []
+    max_bytes = max_size_mb * 1024 * 1024
+    if file_size_bytes > max_bytes:
+        errors.append(f"File too large ({file_size_bytes / 1024 / 1024:.1f}MB). Max is {max_size_mb}MB.")
+    if duration > 0 and duration < min_dur:
+        errors.append(f"Video too short ({duration:.1f}s). Minimum is {min_dur}s.")
+    if duration > max_dur:
+        errors.append(f"Video too long ({duration:.1f}s). Maximum is {max_dur}s.")
+    return errors

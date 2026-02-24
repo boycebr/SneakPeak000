@@ -28,6 +28,7 @@ import time
 from config.settings import (
     SUPABASE_URL,
     SUPABASE_ANON_KEY,
+    SUPABASE_SERVICE_KEY,
     GOOGLE_CLOUD_API_KEY,
     AZURE_FACE_API_KEY,
     AZURE_FACE_ENDPOINT,
@@ -40,7 +41,17 @@ from config.settings import (
 )
 
 # Privacy pipeline — face detection (Google Vision -> Azure -> OpenCV) + blurring
-from utils.video_processing import process_frame_privacy, frame_to_jpeg_bytes
+from utils.video_processing import (
+    process_frame_privacy,
+    frame_to_jpeg_bytes,
+    generate_thumbnail,
+    validate_video,
+)
+from utils.database import (
+    upload_to_storage,
+    generate_storage_path,
+    get_venues_by_energy,
+)
 
 # Video/Image processing
 try:
@@ -532,12 +543,16 @@ def render_energy_donut(score, title="Energy Score"):
     st.plotly_chart(fig, use_container_width=True)
 
 def render_venue_card(venue):
-    """Render a venue card"""
+    """Render a venue card with optional thumbnail"""
     name = venue.get('venue_name', 'Unknown Venue')
     venue_type = venue.get('venue_type', 'Venue')
-    energy = venue.get('energy_score', 0)
-    crowd = venue.get('crowd_density', 'Unknown')
-    
+    energy = venue.get('energy_score', 0) or 0
+    crowd = venue.get('crowd_density', 'Unknown') or 'Unknown'
+    thumb = venue.get('thumbnail_url')
+    genre = venue.get('genre', '')
+    people = venue.get('estimated_people', 0) or 0
+    created = venue.get('created_at', '')
+
     # Color coding for energy
     if energy >= 70:
         energy_color = "#28a745"
@@ -548,9 +563,42 @@ def render_venue_card(venue):
     else:
         energy_color = "#ffc107"
         energy_label = "😌 Chill"
-    
+
+    # Time ago
+    time_label = "Updated recently"
+    if created:
+        try:
+            dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+            diff = datetime.now(dt.tzinfo) - dt
+            mins = int(diff.total_seconds() / 60)
+            if mins < 60:
+                time_label = f"{mins}m ago"
+            elif mins < 1440:
+                time_label = f"{mins // 60}h ago"
+            else:
+                time_label = f"{mins // 1440}d ago"
+        except Exception:
+            pass
+
+    # Build thumbnail HTML
+    thumb_html = ""
+    if thumb:
+        thumb_html = f'''
+        <div style="margin-bottom: 0.5rem;">
+            <img src="{thumb}" style="width:100%; height:120px; object-fit:cover; border-radius:8px;" />
+        </div>'''
+
+    # Build detail chips
+    chips = f'👥 {crowd.title()}'
+    if people > 0:
+        chips += f' (~{people})'
+    if genre:
+        chips += f' | 🎵 {genre}'
+    chips += f' | {time_label}'
+
     st.markdown(f"""
     <div class="venue-card">
+        {thumb_html}
         <div style="display: flex; justify-content: space-between; align-items: center;">
             <div>
                 <h3 style="margin: 0; color: #333;">{name}</h3>
@@ -562,7 +610,7 @@ def render_venue_card(venue):
             </div>
         </div>
         <div style="margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid #eee;">
-            <span style="font-size: 0.85rem; color: #888;">👥 {crowd.title()} | Updated recently</span>
+            <span style="font-size: 0.85rem; color: #888;">{chips}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -574,30 +622,40 @@ def render_venue_card(venue):
 def page_discover():
     """Discover page - browse venues"""
     st.markdown("## 🔍 Discover Venues")
-    
+
+    if 'discover_filter' not in st.session_state:
+        st.session_state.discover_filter = "recent"
+
     # Quick filters
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("🔥 Hot Now", use_container_width=True):
-            st.session_state.filter = "hot"
+            st.session_state.discover_filter = "hot"
     with col2:
         if st.button("😌 Chill", use_container_width=True):
-            st.session_state.filter = "chill"
+            st.session_state.discover_filter = "chill"
     with col3:
         if st.button("🆕 Recent", use_container_width=True):
-            st.session_state.filter = "recent"
-    
+            st.session_state.discover_filter = "recent"
+
+    active = st.session_state.discover_filter
+    st.caption(f"Showing: **{active.title()}**")
     st.markdown("---")
-    
-    # Fetch and display venues
-    venues = get_recent_venues(limit=20)
-    
+
+    # Fetch venues based on active filter
+    if active == "hot":
+        venues = get_venues_by_energy(SUPABASE_URL, SUPABASE_ANON_KEY, order="desc", limit=20)
+    elif active == "chill":
+        venues = get_venues_by_energy(SUPABASE_URL, SUPABASE_ANON_KEY, order="asc", limit=20)
+    else:
+        venues = get_recent_venues(limit=20)
+
     if venues:
         for venue in venues:
             render_venue_card(venue)
     else:
         st.info("🎉 No venues yet! Be the first to upload a video and help others discover great spots.")
-        
+
         # Show sample data
         st.markdown("### 📍 Sample Venues (Demo)")
         sample_venues = [
@@ -659,41 +717,56 @@ def page_upload():
 
 def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longitude):
     """Process uploaded video and save results"""
-    
+
     progress = st.progress(0)
     status = st.empty()
-    
+
     try:
-        # Step 1: Save uploaded file
+        # Step 1: Validate file size before saving
+        file_size = uploaded_file.size
+        size_mb = file_size / (1024 * 1024)
+        if size_mb > MAX_UPLOAD_SIZE_MB:
+            st.error(f"File too large ({size_mb:.1f}MB). Maximum is {MAX_UPLOAD_SIZE_MB}MB.")
+            return
+
         status.info("📥 Saving video...")
         progress.progress(10)
-        
+
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
             tmp_file.write(uploaded_file.read())
             video_path = tmp_file.name
-        
-        # Step 2: Extract metadata
+
+        # Step 2: Extract metadata + validate duration
         status.info("📊 Extracting video metadata...")
-        progress.progress(20)
+        progress.progress(15)
         metadata = extract_video_metadata(video_path)
-        
-        # Validate duration
-        if metadata["duration"] > 60:
-            st.warning("Video is longer than 60 seconds. Only first 60 seconds will be analyzed.")
-        
+
+        errors = validate_video(
+            file_size, metadata["duration"],
+            VIDEO_MIN_DURATION, VIDEO_MAX_DURATION, MAX_UPLOAD_SIZE_MB,
+        )
+        if errors:
+            for err in errors:
+                st.error(err)
+            os.unlink(video_path)
+            return
+
         # Step 3: Extract frames
         status.info("🖼️ Extracting frames...")
-        progress.progress(30)
+        progress.progress(25)
         frames = extract_frames(video_path, num_frames=5)
-        
+
         # Step 4: Detect and blur faces (privacy pipeline)
         status.info("👤 Detecting faces for privacy protection...")
-        progress.progress(40)
+        progress.progress(35)
 
         total_faces = 0
         detection_source = "none"
+        blurred_thumbnail_frame = None
         if frames:
-            for frame in frames[:3]:  # Check first 3 frames
+            # Process the middle frame for the thumbnail
+            mid_idx = len(frames) // 2
+            for i, frame in enumerate(frames[:3]):
                 result = process_frame_privacy(
                     frame,
                     google_api_key=GOOGLE_CLOUD_API_KEY,
@@ -703,31 +776,47 @@ def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longit
                 total_faces = max(total_faces, result["face_count"])
                 if result["source"] != "none":
                     detection_source = result["source"]
-        
-        # Step 5: Audio analysis
+                if i == min(mid_idx, 2):
+                    blurred_thumbnail_frame = result["blurred_frame"]
+
+        # Step 5: Generate and upload thumbnail
+        thumbnail_url = None
+        if blurred_thumbnail_frame is not None:
+            status.info("🖼️ Uploading thumbnail...")
+            progress.progress(45)
+            thumb_bytes = generate_thumbnail(blurred_thumbnail_frame)
+            storage_path = generate_storage_path(venue_name)
+            ok, url_or_err = upload_to_storage(
+                SUPABASE_URL, SUPABASE_SERVICE_KEY,
+                thumb_bytes, storage_path, "image/jpeg",
+            )
+            if ok:
+                thumbnail_url = url_or_err
+
+        # Step 6: Audio analysis
         status.info("🎵 Analyzing audio...")
-        progress.progress(50)
+        progress.progress(55)
         audio_results = analyze_audio_simulated(video_path)
-        
-        # Step 6: Visual analysis
+
+        # Step 7: Visual analysis
         status.info("🎨 Analyzing visuals...")
-        progress.progress(60)
+        progress.progress(65)
         visual_results = analyze_visual(frames)
-        
-        # Step 7: Crowd analysis
+
+        # Step 8: Crowd analysis
         status.info("👥 Analyzing crowd...")
-        progress.progress(70)
+        progress.progress(75)
         crowd_results = analyze_crowd(frames, total_faces)
-        
-        # Step 8: Calculate energy score
+
+        # Step 9: Calculate energy score
         status.info("⚡ Calculating energy score...")
-        progress.progress(80)
+        progress.progress(85)
         energy_score = calculate_energy_score(audio_results, visual_results, crowd_results)
-        
-        # Step 9: Save to database
+
+        # Step 10: Save to database
         status.info("💾 Saving results...")
-        progress.progress(90)
-        
+        progress.progress(95)
+
         result_data = {
             # Venue
             "venue_name": venue_name,
@@ -756,6 +845,8 @@ def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longit
             "face_count": total_faces,
             "faces_blurred": total_faces,
             "privacy_protected": True,
+            # Media
+            "thumbnail_url": thumbnail_url,
             # Scoring
             "energy_score": energy_score,
             "processing_complete": True,
