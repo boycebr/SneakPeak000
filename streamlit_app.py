@@ -729,26 +729,38 @@ def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longit
         progress.progress(90)
         
         result_data = {
+            # Venue
             "venue_name": venue_name,
             "venue_type": venue_type,
             "latitude": latitude,
             "longitude": longitude,
-            "energy_score": energy_score,
+            # Audio
             "bpm": audio_results.get("bpm"),
             "volume_level": audio_results.get("volume_level"),
             "genre": audio_results.get("genre"),
+            "energy_level": audio_results.get("energy_level"),
+            "tempo_consistency": audio_results.get("tempo_consistency"),
+            # Visual
             "brightness_level": visual_results.get("brightness_level"),
             "lighting_type": visual_results.get("lighting_type"),
+            "color_scheme": visual_results.get("color_scheme"),
             "visual_energy": visual_results.get("visual_energy"),
+            "color_saturation": visual_results.get("color_saturation"),
+            # Crowd
             "crowd_density": crowd_results.get("crowd_density"),
+            "activity_level": crowd_results.get("activity_level"),
             "density_score": crowd_results.get("density_score"),
             "estimated_people": crowd_results.get("estimated_people"),
+            "engagement_score": crowd_results.get("engagement_score"),
+            # Privacy
             "face_count": total_faces,
+            "faces_blurred": total_faces,
             "privacy_protected": True,
+            # Scoring
+            "energy_score": energy_score,
             "processing_complete": True,
             "session_id": st.session_state.session_id,
             "video_duration": metadata.get("duration", 0),
-            "created_at": datetime.utcnow().isoformat()
         }
         
         success, response = save_video_results(result_data)
