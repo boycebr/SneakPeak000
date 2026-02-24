@@ -29,6 +29,8 @@ from config.settings import (
     SUPABASE_URL,
     SUPABASE_ANON_KEY,
     GOOGLE_CLOUD_API_KEY,
+    AZURE_FACE_API_KEY,
+    AZURE_FACE_ENDPOINT,
     AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY,
     AWS_REGION,
@@ -36,6 +38,9 @@ from config.settings import (
     VIDEO_MIN_DURATION,
     VIDEO_MAX_DURATION,
 )
+
+# Privacy pipeline — face detection (Google Vision -> Azure -> OpenCV) + blurring
+from utils.video_processing import process_frame_privacy, frame_to_jpeg_bytes
 
 # Video/Image processing
 try:
@@ -343,74 +348,8 @@ def extract_frames(video_path, num_frames=5):
     
     return frames
 
-def detect_faces_google_vision(image_bytes):
-    """Detect faces using Google Cloud Vision API"""
-    if not GOOGLE_CLOUD_API_KEY:
-        return []
-    
-    try:
-        import base64
-        
-        # Encode image to base64
-        encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-        
-        url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_CLOUD_API_KEY}"
-        
-        payload = {
-            "requests": [{
-                "image": {"content": encoded_image},
-                "features": [
-                    {"type": "FACE_DETECTION", "maxResults": 50}
-                ]
-            }]
-        }
-        
-        response = requests.post(url, json=payload, timeout=30)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if 'responses' in result and result['responses']:
-                faces = result['responses'][0].get('faceAnnotations', [])
-                return faces
-        
-        return []
-    except Exception as e:
-        st.warning(f"Face detection error: {e}")
-        return []
-
-def blur_faces_in_frame(frame, face_locations):
-    """Apply blur to detected face regions"""
-    if not CV2_AVAILABLE:
-        return frame
-    
-    blurred_frame = frame.copy()
-    
-    for face in face_locations:
-        try:
-            # Get bounding box from Google Vision format
-            vertices = face.get('boundingPoly', {}).get('vertices', [])
-            if len(vertices) >= 4:
-                x1 = vertices[0].get('x', 0)
-                y1 = vertices[0].get('y', 0)
-                x2 = vertices[2].get('x', 0)
-                y2 = vertices[2].get('y', 0)
-                
-                # Add padding
-                padding = 20
-                x1 = max(0, x1 - padding)
-                y1 = max(0, y1 - padding)
-                x2 = min(frame.shape[1], x2 + padding)
-                y2 = min(frame.shape[0], y2 + padding)
-                
-                # Extract and blur face region
-                face_region = blurred_frame[y1:y2, x1:x2]
-                if face_region.size > 0:
-                    blurred_face = cv2.GaussianBlur(face_region, (99, 99), 30)
-                    blurred_frame[y1:y2, x1:x2] = blurred_face
-        except Exception as e:
-            continue
-    
-    return blurred_frame
+    # detect_faces_google_vision and blur_faces_in_frame are now in utils/
+    # Imported via: from utils.video_processing import process_frame_privacy
 
 # ================================
 # ANALYSIS FUNCTIONS
@@ -747,19 +686,23 @@ def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longit
         progress.progress(30)
         frames = extract_frames(video_path, num_frames=5)
         
-        # Step 4: Detect faces
+        # Step 4: Detect and blur faces (privacy pipeline)
         status.info("👤 Detecting faces for privacy protection...")
         progress.progress(40)
-        
+
         total_faces = 0
-        if frames and PIL_AVAILABLE:
-            import io
+        detection_source = "none"
+        if frames:
             for frame in frames[:3]:  # Check first 3 frames
-                img = Image.fromarray(frame)
-                buffer = io.BytesIO()
-                img.save(buffer, format='JPEG')
-                faces = detect_faces_google_vision(buffer.getvalue())
-                total_faces = max(total_faces, len(faces))
+                result = process_frame_privacy(
+                    frame,
+                    google_api_key=GOOGLE_CLOUD_API_KEY,
+                    azure_api_key=AZURE_FACE_API_KEY,
+                    azure_endpoint=AZURE_FACE_ENDPOINT,
+                )
+                total_faces = max(total_faces, result["face_count"])
+                if result["source"] != "none":
+                    detection_source = result["source"]
         
         # Step 5: Audio analysis
         status.info("🎵 Analyzing audio...")

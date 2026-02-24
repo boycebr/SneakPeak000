@@ -2,9 +2,8 @@
 Video processing utilities — frame extraction, metadata, face blurring.
 """
 
+import io
 import numpy as np
-import tempfile
-import os
 
 try:
     from moviepy.editor import VideoFileClip
@@ -63,7 +62,7 @@ def extract_video_metadata(video_path: str) -> dict:
 
 
 def extract_frames(video_path: str, num_frames: int = 5) -> list:
-    """Extract evenly-spaced frames from a video."""
+    """Extract evenly-spaced frames from a video as RGB numpy arrays."""
     frames = []
     if not CV2_AVAILABLE:
         return frames
@@ -72,6 +71,7 @@ def extract_frames(video_path: str, num_frames: int = 5) -> list:
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames <= 0:
+            cap.release()
             return frames
 
         frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
@@ -88,24 +88,105 @@ def extract_frames(video_path: str, num_frames: int = 5) -> list:
     return frames
 
 
-def blur_faces_in_frame(frame, face_locations: list):
-    """Apply Gaussian blur to detected face regions in a frame."""
+def frame_to_jpeg_bytes(frame: np.ndarray, quality: int = 85) -> bytes:
+    """Convert an RGB numpy frame to JPEG bytes."""
+    if PIL_AVAILABLE:
+        img = Image.fromarray(frame)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
+
+    if CV2_AVAILABLE:
+        bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        _, encoded = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return encoded.tobytes()
+
+    raise RuntimeError("Neither Pillow nor OpenCV available for JPEG encoding")
+
+
+def blur_faces_in_frame(frame: np.ndarray, face_boxes: list, padding: int = 20) -> np.ndarray:
+    """Apply Gaussian blur to detected face regions.
+
+    Args:
+        frame: RGB numpy array (H, W, 3)
+        face_boxes: List of dicts with keys x1, y1, x2, y2 (normalized format
+                    from api_clients.detect_faces)
+        padding: Extra pixels around each face box for more complete coverage
+
+    Returns:
+        Frame with faces blurred.
+    """
     if not CV2_AVAILABLE:
         return frame
 
     blurred = frame.copy()
-    for face in face_locations:
-        try:
-            vertices = face.get("boundingPoly", {}).get("vertices", [])
-            if len(vertices) >= 4:
-                x1 = max(0, vertices[0].get("x", 0) - 20)
-                y1 = max(0, vertices[0].get("y", 0) - 20)
-                x2 = min(frame.shape[1], vertices[2].get("x", 0) + 20)
-                y2 = min(frame.shape[0], vertices[2].get("y", 0) + 20)
+    h, w = frame.shape[:2]
 
-                region = blurred[y1:y2, x1:x2]
-                if region.size > 0:
-                    blurred[y1:y2, x1:x2] = cv2.GaussianBlur(region, (99, 99), 30)
-        except Exception:
+    for face in face_boxes:
+        try:
+            x1 = max(0, int(face["x1"]) - padding)
+            y1 = max(0, int(face["y1"]) - padding)
+            x2 = min(w, int(face["x2"]) + padding)
+            y2 = min(h, int(face["y2"]) + padding)
+
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            region = blurred[y1:y2, x1:x2]
+            if region.size > 0:
+                # Heavy blur — kernel must be odd and large enough to obscure
+                ksize = max(99, ((x2 - x1) // 2) | 1)
+                blurred[y1:y2, x1:x2] = cv2.GaussianBlur(
+                    region, (ksize, ksize), 30
+                )
+        except (KeyError, ValueError):
             continue
+
     return blurred
+
+
+def process_frame_privacy(
+    frame: np.ndarray,
+    google_api_key: str = None,
+    azure_api_key: str = None,
+    azure_endpoint: str = None,
+) -> dict:
+    """Full privacy pipeline for a single frame.
+
+    1. Convert frame to JPEG bytes
+    2. Detect faces using the fallback chain
+    3. Blur all detected faces
+    4. Return results dict
+
+    Returns:
+        {
+            "blurred_frame": np.ndarray (RGB),
+            "face_count": int,
+            "faces": list of normalized face dicts,
+            "source": str (which detector found faces),
+        }
+    """
+    from utils.api_clients import detect_faces
+
+    # Convert frame to JPEG for API calls
+    jpeg_bytes = frame_to_jpeg_bytes(frame)
+
+    # Detect faces
+    faces = detect_faces(
+        jpeg_bytes,
+        google_api_key=google_api_key,
+        azure_api_key=azure_api_key,
+        azure_endpoint=azure_endpoint,
+    )
+
+    # Blur faces
+    blurred = blur_faces_in_frame(frame, faces)
+
+    source = faces[0]["source"] if faces else "none"
+
+    return {
+        "blurred_frame": blurred,
+        "face_count": len(faces),
+        "faces": faces,
+        "source": source,
+    }
