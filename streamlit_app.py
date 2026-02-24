@@ -1,7 +1,7 @@
 """
 SneakPeak MVP - Real-Time Venue Intelligence Platform
 Version: MVP 1.0
-Last Updated: January 2026
+Last Updated: February 2026
 """
 
 import streamlit as st
@@ -23,6 +23,19 @@ import json
 from datetime import datetime
 import uuid
 import time
+
+# Configuration — loaded from .env / Streamlit secrets (no hardcoded keys)
+from config.settings import (
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY,
+    GOOGLE_CLOUD_API_KEY,
+    AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY,
+    AWS_REGION,
+    MAX_UPLOAD_SIZE_MB,
+    VIDEO_MIN_DURATION,
+    VIDEO_MAX_DURATION,
+)
 
 # Video/Image processing
 try:
@@ -48,30 +61,6 @@ try:
     PLOTLY_AVAILABLE = True
 except ImportError:
     PLOTLY_AVAILABLE = False
-
-# ================================
-# CONFIGURATION
-# ================================
-
-# Try to get from Streamlit secrets first, fall back to defaults for testing
-def get_config(key, default=None):
-    """Get configuration from Streamlit secrets or environment variables"""
-    try:
-        return st.secrets.get(key, os.environ.get(key, default))
-    except:
-        return os.environ.get(key, default)
-
-# Supabase Configuration (New Project - January 2026)
-SUPABASE_URL = get_config("SUPABASE_URL", "https://nswmbzcllsbpvqtqpitl.supabase.co")
-SUPABASE_KEY = get_config("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5zd21iemNsbHNicHZxdHFwaXRsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjkxMzA1MjYsImV4cCI6MjA4NDcwNjUyNn0.xwNxffp4R7KPehAJytZg76ygyLr-deraI7pTX-2Q6OA")
-
-# Google Cloud Vision API
-GOOGLE_API_KEY = get_config("GOOGLE_API_KEY", "AIzaSyCqy3rWftM3XS2pADtnhxDHApbJINpkLs0")
-
-# AWS Rekognition (fallback - for future use)
-AWS_ACCESS_KEY = get_config("AWS_ACCESS_KEY", "AKIAV6VAEUEIGNTRPSN6")
-AWS_SECRET_KEY = get_config("AWS_SECRET_KEY", "")
-AWS_REGION = get_config("AWS_REGION", "us-east-2")
 
 # ================================
 # MOBILE-OPTIMIZED CSS
@@ -240,8 +229,8 @@ init_session()
 def get_supabase_headers():
     """Get headers for Supabase API calls"""
     return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
         "Content-Type": "application/json",
         "Prefer": "return=representation"
     }
@@ -356,7 +345,7 @@ def extract_frames(video_path, num_frames=5):
 
 def detect_faces_google_vision(image_bytes):
     """Detect faces using Google Cloud Vision API"""
-    if not GOOGLE_API_KEY:
+    if not GOOGLE_CLOUD_API_KEY:
         return []
     
     try:
@@ -365,7 +354,7 @@ def detect_faces_google_vision(image_bytes):
         # Encode image to base64
         encoded_image = base64.b64encode(image_bytes).decode('utf-8')
         
-        url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_API_KEY}"
+        url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_CLOUD_API_KEY}"
         
         payload = {
             "requests": [{
