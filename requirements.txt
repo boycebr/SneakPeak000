@@ -1,31 +1,20 @@
 # Core
-streamlit>=1.32,<1.39
-requests>=2.32
-
-# Data
-numpy>=1.26,<2
-pandas>=2.2,<2.3
-
-# Viz (only if you use them)
-matplotlib>=3.8,<3.9
-plotly>=5.22,<5.23
-# seaborn  # (remove if unused)
+streamlit>=1.32
+requests>=2.31
+numpy>=1.26
 
 # Video / Image
 moviepy>=1.0.3
 imageio-ffmpeg>=0.4.9
-opencv-python-headless>=4.10.0.84
-pillow>=10.3
+opencv-python-headless>=4.9
+pillow>=10.2
 
 # Audio analysis
 librosa>=0.10
 soundfile>=0.12
 
-# DB / Storage
-supabase>=2.7.4
-postgrest>=0.16.8
-python-dotenv>=1.0.1
+# Visualization
+plotly>=5.18
 
-# AWS Rekognition (optional)
-boto3>=1.34
-botocore>=1.34
+# Config
+python-dotenv>=1.0

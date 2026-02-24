@@ -204,7 +204,7 @@ def upload_to_storage(
 
 def generate_storage_path(venue_name: str, suffix: str = ".jpg") -> str:
     """Generate a unique storage path for a file."""
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(tz=None).strftime("%Y%m%d_%H%M%S")
     uid = uuid.uuid4().hex[:8]
     safe_name = "".join(c if c.isalnum() else "_" for c in venue_name)[:30]
     return f"thumbnails/{timestamp}_{safe_name}_{uid}{suffix}"

@@ -20,9 +20,18 @@ import tempfile
 import os
 import requests
 import json
+import logging
 from datetime import datetime
 import uuid
 import time
+
+# ── Logging setup ──
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("sneakpeak")
 
 # Configuration — loaded from .env / Streamlit secrets (no hardcoded keys)
 from config.settings import (
@@ -272,6 +281,9 @@ def init_session():
         st.session_state.user_lon = None
     if 'auto_refresh' not in st.session_state:
         st.session_state.auto_refresh = False
+    # Rate limiting
+    if 'upload_timestamps' not in st.session_state:
+        st.session_state.upload_timestamps = []
     # Auth state
     if 'access_token' not in st.session_state:
         st.session_state.access_token = None
@@ -305,6 +317,37 @@ def _clear_auth_state():
     st.session_state.refresh_token = None
     st.session_state.user_id = None
     st.session_state.user_email = None
+
+
+# ================================
+# RATE LIMITING
+# ================================
+
+MAX_UPLOADS_PER_HOUR = 10
+
+
+def check_rate_limit() -> bool:
+    """Return True if the user is within the upload rate limit."""
+    now = time.time()
+    one_hour_ago = now - 3600
+    # Prune old timestamps
+    st.session_state.upload_timestamps = [
+        ts for ts in st.session_state.upload_timestamps if ts > one_hour_ago
+    ]
+    return len(st.session_state.upload_timestamps) < MAX_UPLOADS_PER_HOUR
+
+
+def record_upload():
+    """Record a successful upload for rate limiting."""
+    st.session_state.upload_timestamps.append(time.time())
+
+
+def uploads_remaining() -> int:
+    """How many uploads the user has left this hour."""
+    now = time.time()
+    one_hour_ago = now - 3600
+    recent = [ts for ts in st.session_state.upload_timestamps if ts > one_hour_ago]
+    return max(0, MAX_UPLOADS_PER_HOUR - len(recent))
 
 
 # ================================
@@ -990,6 +1033,9 @@ def page_upload():
         return
 
     st.markdown("Help others by sharing what's happening right now!")
+    remaining = uploads_remaining()
+    if remaining <= 3:
+        st.caption(f"Uploads remaining this hour: **{remaining}** / {MAX_UPLOADS_PER_HOUR}")
 
     # Venue details
     with st.form("upload_form"):
@@ -1029,16 +1075,24 @@ def page_upload():
         if not venue_name:
             st.error("Please enter the venue name")
             return
-        
+
         if not uploaded_file:
             st.error("Please upload a video")
             return
-        
+
+        if not check_rate_limit():
+            st.error(f"Upload limit reached ({MAX_UPLOADS_PER_HOUR}/hour). Try again later.")
+            return
+
         # Process the video
         process_video_upload(uploaded_file, venue_name, venue_type, latitude, longitude)
 
 def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longitude):
     """Process uploaded video and save results"""
+    logger.info("Upload started: venue=%s type=%s size=%.1fMB user=%s",
+                venue_name, venue_type, uploaded_file.size / 1024 / 1024,
+                st.session_state.user_email or "anonymous")
+    start_time = time.time()
 
     progress = st.progress(0)
     status = st.empty()
@@ -1219,9 +1273,13 @@ def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longit
             pass
         
         if success:
+            elapsed = round(time.time() - start_time, 1)
+            logger.info("Upload complete: venue=%s energy=%.1f time=%ss",
+                        venue_name, energy_score, elapsed)
             status.empty()
             st.session_state.videos_processed += 1
-            
+            record_upload()
+
             # Show results
             st.success("✅ Video analyzed and shared!")
             
@@ -1265,10 +1323,11 @@ def process_video_upload(uploaded_file, venue_name, venue_type, latitude, longit
             render_energy_donut(energy_score)
     
     except Exception as e:
+        logger.exception("Upload failed: venue=%s error=%s", venue_name, e)
         progress.progress(100)
         status.empty()
         st.error(f"Processing error: {str(e)}")
-        
+
         # Cleanup
         try:
             os.unlink(video_path)
